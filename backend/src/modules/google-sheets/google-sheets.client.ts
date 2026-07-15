@@ -1,4 +1,4 @@
-import { google, sheets_v4 } from "googleapis";
+import { drive_v3, google, sheets_v4 } from "googleapis";
 import { OAuth2Client } from "google-auth-library";
 import { ReauthRequiredError } from "../../shared/http/pipeline-errors";
 
@@ -25,6 +25,15 @@ export interface SheetsClient {
   readHeader(spreadsheetId: string): Promise<string[] | null>;
   /** Overwrite row 1 with the given header (repair drift). */
   writeHeader(spreadsheetId: string, header: string[]): Promise<void>;
+  /**
+   * Whether the spreadsheet is in the owner's Trash or gone entirely.
+   *
+   * This needs the Drive API, not Sheets: a trashed spreadsheet reads and
+   * writes perfectly well through the Sheets API and never 404s, so Sheets
+   * simply cannot tell us. Without this check contacts land silently in a bin
+   * the user cannot see.
+   */
+  isTrashed(spreadsheetId: string): Promise<boolean>;
 }
 
 /** Deleted-sheet signal used by the M5 save-with-recovery flow (not an HTTP error). */
@@ -67,9 +76,33 @@ export function classifyGoogleError(err: unknown): never {
 
 export class GoogleSheetsClient implements SheetsClient {
   private readonly sheets: sheets_v4.Sheets;
+  private readonly drive: drive_v3.Drive;
 
   constructor(auth: OAuth2Client) {
     this.sheets = google.sheets({ version: "v4", auth });
+    // Drive is needed solely for the `trashed` flag — see isTrashed. Scoped to
+    // drive.file (files this app created), the narrowest scope that works.
+    this.drive = google.drive({ version: "v3", auth });
+  }
+
+  async isTrashed(spreadsheetId: string): Promise<boolean> {
+    try {
+      const { data } = await this.drive.files.get({
+        fileId: spreadsheetId,
+        fields: "trashed",
+      });
+      return data.trashed === true;
+    } catch (err) {
+      try {
+        classifyGoogleError(err);
+      } catch (classified) {
+        // Hard-deleted (or beyond our drive.file grant): unusable either way,
+        // and the recovery is identical to the trashed case.
+        if (classified instanceof SheetNotFoundError) return true;
+        throw classified;
+      }
+      return false;
+    }
   }
 
   async appendRow(spreadsheetId: string, row: string[]): Promise<void> {

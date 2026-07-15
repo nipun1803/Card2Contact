@@ -4,6 +4,8 @@ import { Contact } from "../../shared/types/contact";
 import { PipelineOrderError } from "../../shared/http/pipeline-errors";
 import { UserRecord, UserStore } from "../../shared/store/user-store";
 import { SheetsProvisioner } from "../../shared/sheets/sheets-provisioner";
+import { AuditLogger } from "../../shared/audit/audit-logger";
+import { Metrics } from "../../shared/observability/metrics";
 import { OAuth2Client } from "google-auth-library";
 import { SheetNotFoundError, SheetsClient } from "./google-sheets.client";
 
@@ -59,9 +61,10 @@ function headerMatches(actual: string[] | null): boolean {
  * M5 — Google Sheets Integration (docs/modules/M5-Google-Sheets-Integration.md).
  * Appends the confirmed contact to the CURRENT user's own spreadsheet, with
  * resilience baked in:
+ *  - Trashed/deleted sheet: abandon it and Recreate Sheet (see save()).
  *  - Header integrity: read row 1 and repair it if it drifted (no versioning).
- *  - Deleted sheet: if the sheet 404s, recreate it, persist the new id, retry once.
- *  - Revoked access: ReauthRequiredError propagates so the client can reconnect.
+ *  - Revoked access: ReauthRequiredError propagates so the router can null the
+ *    tokens and the client can Reconnect.
  * Depends on M4 having confirmed the contact first.
  */
 export class M5Service {
@@ -69,14 +72,30 @@ export class M5Service {
     private readonly store: CardSessionStore,
     private readonly sheets: SheetsClient,
     private readonly provisioner: SheetsProvisioner,
-    private readonly userStore: UserStore
+    private readonly userStore: UserStore,
+    private readonly audit: AuditLogger,
+    private readonly metrics: Metrics
   ) {}
+
+  /** Recreate Sheet: abandon the unusable spreadsheet and provision a fresh one. */
+  private async recreateSheet(
+    user: UserRecord,
+    authClient: OAuth2Client,
+    reason: "trashed" | "not_found"
+  ): Promise<string> {
+    const spreadsheetId = await this.provisioner.ensureSpreadsheet(user, authClient);
+    // No spreadsheetId in the audit entry: the event plus the user is enough,
+    // and the id is a capability-ish identifier.
+    this.audit.log({ event: "sheet_recreated", googleUserId: user.googleUserId, reason });
+    this.metrics.inc("sheet_recreated", { reason });
+    return spreadsheetId;
+  }
 
   /**
    * @param user       the authenticated user (owns the target spreadsheet)
-   * @param authClient the user's authorized OAuth2Client, for re-provisioning on 404.
-   * `provisioner.ensureSpreadsheet` persists any newly-created spreadsheet id,
-   * so this service never writes to the user store directly.
+   * @param authClient the user's authorized OAuth2Client, for re-provisioning.
+   * `provisioner.ensureSpreadsheet` persists the new spreadsheet's id, url, and
+   * title, so this service never writes to the user store directly.
    */
   async save(cardId: string, user: UserRecord, authClient: OAuth2Client): Promise<CardSession> {
     const session = this.store.get(cardId);
@@ -91,11 +110,28 @@ export class M5Service {
       ? user.spreadsheetId
       : await this.provisioner.ensureSpreadsheet(user, authClient);
 
+    /**
+     * Trash check FIRST, before the header check.
+     *
+     * A trashed spreadsheet reads and writes normally through the Sheets API —
+     * it does not 404 — so without this the contact would land silently in a
+     * bin the user cannot see. It must precede readHeader for the same reason:
+     * readHeader SUCCEEDS on a trashed sheet, returning the real header, so the
+     * `header === null` branch below would never fire for this case and the
+     * recovery would be dead code.
+     *
+     * We never reconnect to a trashed sheet — even one the user could restore.
+     * Abandon it and Recreate Sheet.
+     */
+    if (await this.sheets.isTrashed(spreadsheetId)) {
+      spreadsheetId = await this.recreateSheet(user, authClient, "trashed");
+    }
+
     // Header integrity: repair row 1 if it drifted from SHEET_HEADER.
     const header = await this.sheets.readHeader(spreadsheetId);
     if (header === null) {
       // Sheet is gone — recreate before we even append.
-      spreadsheetId = await this.provisioner.ensureSpreadsheet(user, authClient);
+      spreadsheetId = await this.recreateSheet(user, authClient, "not_found");
     } else if (!headerMatches(header)) {
       await this.sheets.writeHeader(spreadsheetId, [...SHEET_HEADER]);
     }
@@ -104,9 +140,9 @@ export class M5Service {
       await this.sheets.appendRow(spreadsheetId, row);
     } catch (err) {
       if (err instanceof SheetNotFoundError) {
-        // User deleted the sheet between the header check and append: recreate,
-        // persist the new id, and retry the append exactly once.
-        spreadsheetId = await this.provisioner.ensureSpreadsheet(user, authClient);
+        // Last-resort race handler: the sheet was deleted between our checks
+        // and this append. Recreate, persist the new id, retry exactly once.
+        spreadsheetId = await this.recreateSheet(user, authClient, "not_found");
         await this.sheets.appendRow(spreadsheetId, row);
       } else {
         // ReauthRequiredError and anything else propagate to the router.

@@ -31,13 +31,16 @@ function handleUploadErrors(mw: RequestHandler): RequestHandler {
     });
 }
 
-export function createM1Router(store: CardSessionStore): Router {
+export function createM1Router(store: CardSessionStore, uploadLimiter: RequestHandler): Router {
   const service = new ImageAcquisitionService(store);
   const router = Router();
 
   // POST /api/cards — docs/modules/M1-Image-Acquisition.md §5
   router.post(
     "/cards",
+    // Before multer, deliberately: a rate-limited request should be rejected
+    // without first buffering up to 10MB of image into memory.
+    uploadLimiter,
     handleUploadErrors(
       upload.fields([
         { name: "frontImage", maxCount: 1 },
