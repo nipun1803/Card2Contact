@@ -35,7 +35,13 @@ actually runs on the server:
 - An Oracle Cloud (or any) Ubuntu 22.04+ VPS with a public IP, reachable over SSH.
 - A domain name you control, for HTTPS (e.g. `card2contact.example.com`).
 - Real credentials for: Mistral API key, Google OAuth client ID/secret (from
-  Google Cloud Console).
+  Google Cloud Console). The OAuth consent screen must list five scopes:
+  `openid`, `email`, `profile`, `.../auth/spreadsheets`, and
+  `.../auth/drive.file`. `drive.file` grants access only to files this app
+  itself created, and is what lets the app notice a spreadsheet the user moved
+  to Trash — the Sheets API cannot report that (a trashed sheet reads and
+  writes normally and never 404s). Adding a scope to an existing client means
+  every current user re-consents on their next sign-in, which is expected.
 
 ---
 
@@ -522,6 +528,23 @@ curl -sf http://localhost/api/health
 echo "$TAG" > .deployed_tag   # once you've confirmed it's healthy
 ```
 
+> **Rolling back past the token-encryption release has a trap.** Older images
+> read tokens as plaintext, so they would send the stored `iv:tag:ciphertext`
+> straight to Google, which rejects it — users see broken saves rather than a
+> clean "Reconnect Google" prompt. If you roll back that far, null the tokens
+> as part of the rollback so every user gets an honest Reconnect instead:
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml exec -T postgres \
+>   psql -U c2c -d card2contact -c \
+>   "UPDATE users SET access_token=NULL, refresh_token=NULL, token_expiry=NULL;"
+> ```
+>
+> Do **not** restore `users-pre-cutover.sql` wholesale to get the old tokens
+> back — it would also revert `saved_contacts_count` and `spreadsheet_id`,
+> orphaning users' sheets. Any move across this release (forward or back) signs
+> everyone out once; that's expected.
+
 ### Logs and debugging
 
 ```bash
@@ -530,6 +553,26 @@ docker compose -f docker-compose.prod.yml ps
 docker compose -f docker-compose.prod.yml exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 cat /opt/card2contact/.deployed_tag
 ```
+
+Security events and operational counters are JSON lines on the backend's
+stdout, so `docker logs` is the query interface:
+
+```bash
+# Who signed in / out, from where; session replacements; auth failures.
+docker compose -f docker-compose.prod.yml logs backend | grep '"kind":"audit"'
+
+# Aggregate counters, emitted every 60s but only when something changed.
+docker compose -f docker-compose.prod.yml logs backend | grep '"kind":"metrics"'
+```
+
+Entries never contain tokens, emails, or contact data, and session ids are
+truncated to 8 characters — enough to correlate events within one session,
+useless as a credential. The two counters worth watching:
+
+- **`sheet_recreated`** — a spike means users are trashing their sheets, or the
+  trash check is misfiring and recreating in a loop.
+- **`token_refresh_failure`** — one user is a normal revocation; *every* user at
+  once means a wrong `TOKEN_ENCRYPTION_KEY` (see Secret rotation below).
 
 ### Secret rotation
 

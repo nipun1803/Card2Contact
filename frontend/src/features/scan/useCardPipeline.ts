@@ -12,6 +12,7 @@ import {
   updateContact,
 } from "@/shared/services/api";
 import { addRecentScan } from "@/shared/services/recentScans";
+import { useAuthActions } from "@/features/auth/useAuth";
 import type { CardMode } from "@/shared/types/api";
 import type { Contact } from "@/shared/types/contact";
 
@@ -104,6 +105,7 @@ function isSessionLost(err: unknown): boolean {
 
 export function useCardPipeline() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const { refreshAuth } = useAuthActions();
 
   const submit = useCallback(
     async (mode: CardMode, front: File, back: File | null) => {
@@ -140,6 +142,11 @@ export function useCardPipeline() {
         await confirmContact(cardId);
         await saveContact(cardId, edited);
         addRecentScan(cardId, edited);
+        // A save may have just recreated the user's sheet (trashed/deleted case),
+        // which updates spreadsheetId/url/title in Postgres — refetch auth status
+        // so the dashboard's sheet link/title picks up the change immediately
+        // instead of waiting for a window-focus refetch.
+        refreshAuth();
         dispatch({ type: "DONE" });
         toast.success("Contact saved to Google Sheets");
       } catch (err) {
@@ -160,7 +167,7 @@ export function useCardPipeline() {
         dispatch({ type: "ERROR", status: "review", message: describe(err) });
       }
     },
-    [state],
+    [state, refreshAuth],
   );
 
   const reset = useCallback(() => dispatch({ type: "RESET" }), []);
