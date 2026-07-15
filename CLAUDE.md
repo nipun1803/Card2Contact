@@ -12,15 +12,29 @@ only covers what a coding agent needs before touching the repo.
 
 - Backend: Node.js + TypeScript + Express, modular monolith (`backend/src/modules/` = M1–M5 + google-auth; `backend/src/shared/` = cross-module contracts only).
 - Frontend: React + TypeScript (Vite), API-driven, no business logic — calls backend via `fetch` with `credentials: "include"`.
-- Persistence: Postgres `users` table (identity, OAuth tokens, per-user spreadsheet id). Pipeline state (M1→M4) is in-memory only, keyed by `cardId`, and does not survive a restart — that's intentional.
+- Persistence: Postgres — `users` (identity, AES-encrypted OAuth tokens, per-user spreadsheet id/url/title) and `sessions` / `pending_sessions` (single active session). Pipeline state (M1→M4) is in-memory only, keyed by `cardId`, and does not survive a restart — that's intentional.
 - Infra: Docker Compose (nginx, backend, frontend, postgres).
 
 ## Module boundary rule
 
 A module never imports another module's service/router directly. Cross-module
 communication goes through shared interfaces in `backend/src/shared/`
-(`CardSessionStore`, `UserStore`, `SheetsProvisioner`). `app.ts` is the
-composition root that wires implementations in.
+(`CardSessionStore`, `UserStore`, `SessionStore`, `SheetsProvisioner`,
+`AuditLogger`, `Metrics`). `app.ts` is the composition root that wires
+implementations in.
+
+## Terminology (use these exact words)
+
+Security/session vocabulary is standardized — see the table in
+`docs/ARCHITECTURE.md`. The short version: **Session Revocation** (umbrella),
+**Session Replacement** (a new sign-in wins a **Session Conflict**), **Session
+Termination** (logout), **Pending Session**, **Active Session**, **Idle
+Timeout** (30d) vs **Absolute Lifetime** (7d, the binding one), **Recreate
+Sheet**, **Reconnect** (always about *tokens*), **Token Cutover**. Never "kick",
+"invalidate", "restore", or "re-auth". Audit event names match these terms.
+
+"M5" is the requirement id (docs); `google-sheets` is the module id (code
+paths). Both are correct in context — don't invent a third.
 
 ## Commands
 
@@ -42,24 +56,37 @@ npm run test:e2e                     # Playwright — needs `docker compose up -
 No ESLint in either project — typecheck is the only static gate. Full test
 architecture is in `docs/TESTING.md`.
 
-## Known-confirmed bugs (2026-07 audit) — do not silently "fix" without asking
+## Known-confirmed bugs — do not silently "fix" without asking
 
-These were deliberately left unfixed (a tests-only phase pinned current
-behavior with regression markers). If work touches these areas, flag it but
-don't fix opportunistically unless asked:
+Deliberately left unfixed; regression markers pin current behavior. Flag if you
+touch these, but don't fix opportunistically unless asked:
 
-- **nginx 413 on real photos** — `nginx.conf` has no `client_max_body_size`; default 1MB rejects camera uploads through `:8080` (works fine hitting backend `:4000` directly). Multer also has no `fileSize` limit.
-- **"Prod" frontend Docker runs the Vite dev server**, not a build — `frontend/Dockerfile` runs `npm run dev --host`. `frontend/dist` (`vite build`) works but is unused.
-- **No TLS + forced `Secure` cookie** — `backend/Dockerfile` sets `NODE_ENV=production` → `session.ts` sets `secure:true`, but nothing terminates TLS. Fine on `localhost` (browser-exempt), breaks login on any real hostname.
 - **M3 phone regex bleeds across lines** — `[\d\s().-]{6,}` includes `\s`, so it can swallow a leading digit from the next line (e.g. address) into the phone number. M3 extraction is a known placeholder heuristic, not the final implementation.
-- `ScanApp.tsx` passes `saving={false}` hardcoded to `ContactReviewForm` — submit loading/disable state never engages.
-- OAuth token encryption is scaffolded (`AesGcmTokenCodec`) but not wired — tokens are stored plaintext. Must be enabled before handling real user data.
+- `ScanApp.tsx:90` passes `saving={false}` hardcoded to `ContactReviewForm` — submit loading/disable state never engages.
 
-Full list with file/line detail: ask for the audit notes rather than re-deriving from scratch.
+Fixed since the 2026-07 audit (do not re-report): nginx 413 (`client_max_body_size 10m`
+in both configs) and the missing multer limit (`fileSize` in the M1 router); no
+TLS (`nginx.prod.conf` terminates it, `docker-compose.prod.yml` + `frontend/Dockerfile`'s
+`prod` target serve a real build); plaintext OAuth tokens (AES-256-GCM is wired
+and mandatory). The dev compose file still uses the Vite `dev` target **by
+design** — `prod` exists for `docker-compose.prod.yml`.
+
+## Security invariants — don't break these without reading the docs
+
+`docs/ARCHITECTURE.md` has the full Security Guarantees table, the audit field
+policy, and the rollback plan. The ones easiest to break by accident:
+
+- **`app.set("trust proxy", 1)` must stay `1` and stay first in `app.ts`.** `true` lets any client forge `X-Forwarded-For`, poisoning session/audit/rate-limit records.
+- **`SessionRevokedError` is raised by the session middleware, not `requireAuth`.** `/status` is public and is what notices a revocation; moving the check would silently break the whole flow.
+- **The trash check precedes the header check in `M5Service.save()`.** `readHeader` succeeds on a trashed sheet, so reversing the order makes the recovery dead code.
+- **The Token Cutover wipe (`init.ts`) must stay self-limiting.** `initSchema` runs on every boot; an unconditional `UPDATE users SET access_token=NULL` would sign everyone out forever. It wipes only non-ciphertext-shaped tokens.
+- **Never log tokens, emails, contact data, or full session ids.** Session ids are truncated at the sink (`StdoutAuditLogger`) so no call site can leak one.
+- **`sameSite:"lax"` on the session cookie is required**, not incidental: `strict` would withhold it on the redirect back from Google and loop the user at `/login`.
 
 ## Working in this repo
 
-- Not currently a git repository (`git init` if version control is wanted).
 - Camera capture requires a secure context (`localhost` or HTTPS).
-- Credentials: `SESSION_SECRET`, `MISTRAL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `DATABASE_URL` — all via env vars, see `.env.example`. Never hardcode or commit real values.
-- Error convention (backend): `CardNotFoundError`→404, `PipelineOrderError`→409, `ValidationError`→400, `NotAuthenticatedError`→401, `ReauthRequiredError`→401 with `{code:"REAUTH_REQUIRED"}` (triggers frontend reconnect prompt). All handled once in `backend/src/shared/http/error-handler.ts`.
+- Credentials: `SESSION_SECRET` (≥32 chars), `TOKEN_ENCRYPTION_KEY` (**required** — backend exits at boot without it; `openssl rand -hex 32`), `MISTRAL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `DATABASE_URL` — all via env vars, see `.env.example`. Never hardcode or commit real values.
+- Error convention (backend): `CardNotFoundError`→404, `PipelineOrderError`→409, `ValidationError`→400, `NotAuthenticatedError`→401, `SessionRevokedError`→401 with `{code:"SESSION_REVOKED"}`, `ReauthRequiredError`→401 with `{code:"REAUTH_REQUIRED"}`. The two 401s are matched specific-first. All handled once in `backend/src/shared/http/error-handler.ts`.
+- Rate limiters are **disabled when `NODE_ENV=test`** (`shared/http/rate-limit.ts`) — integration specs fire dozens of requests from one IP. `tests/unit/rate-limit.test.ts` enables them explicitly.
+- The dev frontend container has **no bind mount** — it bakes `src/` in at build time. After changing frontend code, `docker compose up -d --build frontend` before running E2E, or you'll test stale code.

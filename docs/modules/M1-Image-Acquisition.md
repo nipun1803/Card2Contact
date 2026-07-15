@@ -3,7 +3,7 @@
 ## Quick reference
 
 - `POST /api/cards`
-- Depends on: nothing (pipeline entry point) · Provides: image reference(s) for `cardId` → M2
+- Depends on: nothing (pipeline entry point) · Provides: image(s) for `cardId` → M2
 
 ## 1. Purpose & scope
 
@@ -16,7 +16,7 @@ Single implicit user, no roles or permission keys — MMVP has no auth/user mana
 
 ## 3. Entities (data model)
 
-N/A. Images are held transiently for the duration of the submission (in-memory/session) and are not persisted to a database.
+N/A. Images are held transiently on the `CardSession` for the duration of the submission and are not persisted to a database.
 
 ## 4. Business rules
 
@@ -33,7 +33,9 @@ N/A. Images are held transiently for the duration of the submission (in-memory/s
 - Purpose: submit a new card for processing.
 - Request: `multipart/form-data` — `mode` (`single` | `double`), `frontImage` (file), `backImage` (file, required if `mode=double`), each file ≤10MB.
 - Response (`201`): `{ "cardId": "3f1b...c9", "mode": "single" }`
-- No permission gate (single implicit user). No persisted-data query — request is held in-session only.
+- Precondition: none (pipeline entry point).
+- Postcondition: a new `CardSession` exists for `cardId` with `mode`, `frontImage`, `backImage` set; `rawText`/`contact` null, `confirmed`/`saved` false.
+- No permission gate. No persisted-data query — request is held in-session only.
 
 | Status | Error | Trigger |
 |---|---|---|
@@ -44,7 +46,7 @@ N/A. Images are held transiently for the duration of the submission (in-memory/s
 
 ## 6. Inter-module contracts
 
-- Provides: image reference(s) for `cardId`, consumed by M2 (Text Recognition).
+- Provides: image(s) for `cardId`, consumed by M2 (Text Recognition).
 - Depends on: nothing upstream (pipeline entry point).
 
 ## Out of Scope
@@ -56,7 +58,11 @@ N/A. Images are held transiently for the duration of the submission (in-memory/s
 ## Implementation Notes
 
 - `cardId` is a v4 UUID (`crypto.randomUUID()`), generated when the session is created.
-- Images are parsed via `multer` memory storage (never written to disk) and held as raw `Buffer`s on the in-memory `CardSession` record — see `backend/src/shared/store/card-session-store.ts`.
-- The 10MB cap above is enforced at the app layer (`multer` `fileSize` limit) and is separate from the nginx reverse-proxy body-size limit — see the nginx 413 issue in the repo's known-bugs notes; the two limits are independent and currently inconsistent (nginx's default is smaller).
-- Frontend image source (per side): file upload (with `capture="environment"` so mobile opens the camera) OR live camera via `getUserMedia` → capture to canvas → `File` (`frontend/src/components/CameraCapture.tsx`). If the camera is denied/unavailable, the UI auto-falls back to upload. `getUserMedia` requires a secure context (https or localhost); over plain-HTTP non-localhost the camera path is unavailable and only upload works.
+- Images are parsed via `multer` memory storage (never written to disk) and held as raw `Buffer`s on `CardSession` — see `backend/src/shared/store/card-session-store.ts`.
+- The 10MB cap is app-layer (`multer` `fileSize`), separate from and currently smaller than nginx's default body-size limit — see the nginx 413 issue in the repo's known-bugs notes.
+- Validation order: mode → front-image presence → double-mode back-image requirement. A request wrong in more than one way reports the first failing check.
+- No `fileFilter` is configured — any mimetype under 10MB is accepted (a non-image only fails later, at OCR). A zero-byte file also passes. When `mode="single"`, an uploaded `backImage` is accepted by multer but never stored.
+- `LIMIT_FILE_SIZE` is the only multer error mapped to a 400; any other multer error (e.g. an unexpected field name) falls through to a generic 500.
+- Frontend image source (per side): file upload (`capture="environment"` opens the camera on mobile) or live camera via `getUserMedia` → canvas → `File` (`frontend/src/components/CameraCapture.tsx`), falling back to upload if the camera is denied/unavailable. `getUserMedia` requires a secure context (https or localhost).
+- No external calls, no DB — in-memory buffer copy only.
 - Implemented in `backend/src/modules/image-acquisition/`.

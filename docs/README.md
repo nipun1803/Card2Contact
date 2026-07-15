@@ -6,9 +6,21 @@ Card2Contact turns a photographed or uploaded business card into a saved contact
 
 ## Pipeline
 
+```mermaid
+flowchart LR
+  M1[M1 Image Acquisition] --> M2[M2 Text Recognition]
+  M2 --> M3[M3 Contact Extraction]
+  M3 --> M4[M4 Contact Review]
+  M4 --> M5[M5 Google Sheets Integration]
 ```
-M1 Image Acquisition → M2 Text Recognition → M3 Contact Extraction → M4 Contact Review → M5 Google Sheets Integration
-```
+
+## How to read these docs
+
+New to the project: start here for the pipeline shape, then read
+[ARCHITECTURE.md](ARCHITECTURE.md) for how it's actually wired (stack,
+session state, error conventions), then the specific module doc for the
+area you're changing. Already familiar: jump straight to the module doc —
+each one is self-contained, with cross-links where it depends on another.
 
 ## Modules
 

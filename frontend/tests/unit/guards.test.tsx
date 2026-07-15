@@ -10,6 +10,9 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 const useAuthMock = vi.fn();
 vi.mock("@/features/auth/useAuth", () => ({ useAuth: () => useAuthMock() }));
 
+const toastInfo = vi.fn();
+vi.mock("sonner", () => ({ toast: { info: (...args: unknown[]) => toastInfo(...args) } }));
+
 import { ProtectedRoute } from "@/routes/guards";
 
 function renderAt() {
@@ -57,5 +60,72 @@ describe("ProtectedRoute", () => {
     renderAt();
     expect(screen.queryByText("PROTECTED CONTENT")).not.toBeInTheDocument();
     expect(screen.queryByText("LOGIN PAGE")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Session Revocation — the user signed in on another device (single active
+ * session). It is a definitive ANSWER from the server, not a failure to get
+ * one, so it must not be confused with the retryable "couldn't verify" state.
+ */
+describe("ProtectedRoute — a revoked session", () => {
+  function revoked(message = "You were signed out because you signed in on another device") {
+    return {
+      isLoading: false,
+      // useAuth suppresses isError for a revoked session precisely so the guard
+      // can tell these apart; mirror that contract here.
+      isError: false,
+      sessionRevoked: true,
+      sessionRevokedMessage: message,
+      authenticated: false,
+      refetch: vi.fn(),
+    };
+  }
+
+  it("redirects to /login", () => {
+    useAuthMock.mockReturnValue(revoked());
+    renderAt();
+    expect(screen.getByText("LOGIN PAGE")).toBeInTheDocument();
+    expect(screen.queryByText("PROTECTED CONTENT")).not.toBeInTheDocument();
+  });
+
+  // The whole reason SESSION_REVOKED exists as a distinct code: without the
+  // toast the user is thrown back to /login with no idea why.
+  it("explains why, with the server's message", () => {
+    useAuthMock.mockReturnValue(revoked("You were signed out because you signed in on another device"));
+    renderAt();
+    expect(toastInfo).toHaveBeenCalledWith(
+      "You were signed out because you signed in on another device",
+    );
+  });
+
+  it("falls back to a default message when the server sends none", () => {
+    useAuthMock.mockReturnValue({ ...revoked(), sessionRevokedMessage: undefined });
+    renderAt();
+    expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/another device/i));
+  });
+
+  it("announces once, not on every re-render", () => {
+    useAuthMock.mockReturnValue(revoked());
+    const { rerender } = renderAt();
+    rerender(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <Routes>
+          <Route element={<ProtectedRoute />}>
+            <Route path="/dashboard" element={<div>PROTECTED CONTENT</div>} />
+          </Route>
+          <Route path="/login" element={<div>LOGIN PAGE</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(toastInfo).toHaveBeenCalledTimes(1);
+  });
+
+  // A Retry button here would offer an action that can never succeed.
+  it("never shows the retryable error state", () => {
+    useAuthMock.mockReturnValue({ ...revoked(), isError: true });
+    renderAt();
+    expect(screen.queryByText(/couldn’t verify your session/i)).not.toBeInTheDocument();
+    expect(screen.getByText("LOGIN PAGE")).toBeInTheDocument();
   });
 });

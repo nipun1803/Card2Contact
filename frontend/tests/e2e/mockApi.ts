@@ -17,6 +17,13 @@ export interface MockOptions {
   savedContactsCount?: number;
   /** Force the save step to fail with REAUTH_REQUIRED (reconnect flow). */
   saveReauthRequired?: boolean;
+  /**
+   * Make every request 401 with SESSION_REVOKED — the state of a device whose
+   * session was ended by a sign-in elsewhere (Session Replacement).
+   */
+  sessionRevoked?: boolean;
+  /** Make POST /session/continue fail, as an expired Pending Session would. */
+  continueFails?: boolean;
 }
 
 const json = (route: Route, status: number, body: unknown) =>
@@ -28,21 +35,43 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     needsReconnect = false,
     savedContactsCount = 7,
     saveReauthRequired = false,
+    sessionRevoked = false,
+    continueFails = false,
   } = opts;
 
-  // Auth status — the single query that gates the whole authenticated shell.
-  await page.route("**/api/auth/google/status", (route) =>
-    json(route, 200, {
+  const revoked = (route: Route) =>
+    json(route, 401, {
+      error: "Your session was ended because you signed in on another device",
+      code: "SESSION_REVOKED",
+    });
+
+  // Auth status — the single query that gates the whole authenticated shell,
+  // and (thanks to refetchOnWindowFocus) the one that surfaces a revoked
+  // session on an otherwise idle tab.
+  await page.route("**/api/auth/google/status", (route) => {
+    if (sessionRevoked) return revoked(route);
+    return json(route, 200, {
       authenticated,
       email: "ada@analyticalengines.com",
       needsReconnect,
       spreadsheetTitle: "Card2Contact Contacts",
       spreadsheetUrl: "https://docs.google.com/spreadsheets/d/mock-sheet",
       savedContactsCount,
-    }),
-  );
+    });
+  });
 
   await page.route("**/api/auth/logout", (route) => json(route, 200, { ok: true }));
+
+  // Session Conflict resolution. Both authenticate via the short-lived pending
+  // cookie the backend set during the OAuth callback.
+  await page.route("**/api/auth/session/continue", (route) => {
+    if (continueFails) {
+      // What an expired Pending Session (5 min TTL) looks like.
+      return json(route, 401, { error: "This sign-in request expired — please sign in again" });
+    }
+    return json(route, 200, { ok: true });
+  });
+  await page.route("**/api/auth/session/cancel", (route) => json(route, 200, { ok: true }));
 
   // M1 submit
   await page.route("**/api/cards", (route) => {

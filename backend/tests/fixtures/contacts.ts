@@ -41,6 +41,8 @@ export function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
     googleUserId: "user-1",
     email: "ada@analyticalengines.com",
     spreadsheetId: "sheet-1",
+    spreadsheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1",
+    spreadsheetTitle: "Card2Contact Contacts",
     accessToken: "access-token",
     refreshToken: "refresh-token",
     tokenExpiry: null,

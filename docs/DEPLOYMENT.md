@@ -49,9 +49,27 @@ cd card2contact
 cp .env.example .env
 ```
 
-Edit `.env` and fill in real values for `SESSION_SECRET` (any long random
-string), `MISTRAL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`,
+Edit `.env` and fill in real values. Two are generated, not chosen — the
+backend validates both at boot and **refuses to start** if they're missing or
+too short:
+
+```bash
+openssl rand -hex 32   # SESSION_SECRET       — must be >= 32 chars
+openssl rand -hex 32   # TOKEN_ENCRYPTION_KEY — must decode to exactly 32 bytes
+```
+
+`SESSION_SECRET` signs the session cookie; it is the only thing between a user
+and a forged session id. `TOKEN_ENCRYPTION_KEY` encrypts OAuth tokens at rest
+(AES-256-GCM). Then fill in `MISTRAL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, and
 `GOOGLE_OAUTH_CLIENT_SECRET`. Leave the rest at their defaults.
+
+Use `KEY=value` with no spaces around the `=` — some tooling keeps a trailing
+space in the variable name otherwise.
+
+> **Keep `TOKEN_ENCRYPTION_KEY` somewhere durable**, alongside
+> `SESSION_SECRET`. If it's lost, every stored token becomes undecryptable and
+> all users must Reconnect Google once (no contact data is lost — that lives in
+> Google Sheets). See ARCHITECTURE.md → *Rollback & recovery*.
 
 ```bash
 docker compose up -d --build
@@ -101,8 +119,14 @@ nginx on port 80 inside the image — a completely different artifact from the
 Quick sanity check that they run:
 
 ```bash
+# Throwaway values, but SESSION_SECRET must still be >= 32 chars and
+# TOKEN_ENCRYPTION_KEY must decode to 32 bytes — the backend validates both at
+# boot and exits otherwise. That's the point of this smoke test.
 docker run --rm -d --name c2c-test-backend -p 4001:4000 \
-  -e PORT=4000 -e SESSION_SECRET=test -e MISTRAL_API_KEY=test \
+  -e PORT=4000 \
+  -e SESSION_SECRET=$(openssl rand -hex 32) \
+  -e TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  -e MISTRAL_API_KEY=test \
   -e GOOGLE_OAUTH_CLIENT_ID=test -e GOOGLE_OAUTH_CLIENT_SECRET=test \
   -e GOOGLE_OAUTH_REDIRECT_URI=http://localhost/api/auth/google/callback \
   -e DATABASE_URL=postgres://c2c:c2c@localhost:5432/card2contact \
@@ -240,10 +264,10 @@ New repository secret** and add each of these:
 | `VPS_SSH_KEY` | The full contents of the **private** key file `deploy_key` from Step 5 (including the `-----BEGIN OPENSSH PRIVATE KEY-----` / `-----END...` lines) |
 | `MISTRAL_API_KEY_CI` | A separate, low-quota Mistral API key used only by the E2E job on pull requests — keep it distinct from the production key |
 
-Note: `SESSION_SECRET`, `POSTGRES_*`, `MISTRAL_API_KEY` (production),
-`GOOGLE_OAUTH_CLIENT_ID`/`SECRET` are **not** added here — they go directly
-into a `.env` file on the VPS in Step 8, and never pass through GitHub
-Actions.
+Note: `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `POSTGRES_*`,
+`MISTRAL_API_KEY` (production), `GOOGLE_OAUTH_CLIENT_ID`/`SECRET` are **not**
+added here — they go directly into a `.env` file on the VPS in Step 8, and
+never pass through GitHub Actions.
 
 Then set up branch protection: **Settings → Branches → Add branch protection
 rule** for `main` → require these status checks to pass before merging:
@@ -297,7 +321,14 @@ mkdir -p backups data/postgres
 nano .env
 ```
 
-Paste and fill in real values:
+Generate the two secrets first — on your local machine, so you have a copy:
+
+```bash
+openssl rand -hex 32   # SESSION_SECRET
+openssl rand -hex 32   # TOKEN_ENCRYPTION_KEY
+```
+
+Paste and fill in real values (`KEY=value`, no spaces around the `=`):
 
 ```bash
 POSTGRES_USER=c2c
@@ -305,7 +336,8 @@ POSTGRES_PASSWORD=<generate a strong random password>
 POSTGRES_DB=card2contact
 DATABASE_URL=postgres://c2c:<same password as above>@postgres:5432/card2contact
 
-SESSION_SECRET=<long random string>
+SESSION_SECRET=<64-hex from openssl — must be >= 32 chars>
+TOKEN_ENCRYPTION_KEY=<64-hex from openssl — must decode to exactly 32 bytes>
 MISTRAL_API_KEY=<your production Mistral API key>
 
 GOOGLE_OAUTH_CLIENT_ID=<your Google OAuth client id>
@@ -318,6 +350,38 @@ FRONTEND_URL=https://<YOUR_DOMAIN>
 Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano). Do **not** run
 `docker compose up` yet — `nginx.prod.conf` references TLS certificates that
 don't exist until the next step.
+
+> **Back up `TOKEN_ENCRYPTION_KEY` off the VPS**, with `SESSION_SECRET`. It is
+> the only thing that can decrypt the OAuth tokens in your database. Losing it
+> is survivable (every user Reconnects Google once; no contact data is lost —
+> that lives in Google Sheets) but entirely avoidable.
+>
+> **The backend will not start without `TOKEN_ENCRYPTION_KEY`.** That is
+> deliberate: a loud crash beats a server that fails on every token read. If
+> Step 10 shows the backend restarting in a loop, check
+> `docker compose logs backend` for `TOKEN_ENCRYPTION_KEY must be set`.
+
+### Upgrading an existing deployment
+
+If this VPS already ran a version that stored tokens in plaintext, snapshot the
+`users` table **before** the first boot on the new image — that snapshot is the
+only remaining copy of those tokens once the Token Cutover runs:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U c2c -t users card2contact > backups/users-pre-cutover.sql
+```
+
+On first boot you'll see `[schema] Token Cutover: cleared plaintext tokens for
+N user(s)`. That's expected and happens exactly once — those users reconnect
+Google on their next sign-in. Restarts afterwards are silent; if you ever see
+that line again on a plain restart, something is wrong (see ARCHITECTURE.md →
+*Rollback & recovery*).
+
+Also expect **every user to be signed out once** on this upgrade: the session
+cookie's meaning changed from a user id to an opaque session id, so old cookies
+are no longer valid. This happens in both directions across the upgrade, and is
+not a bug.
 
 Also update the Google OAuth client in Google Cloud Console → APIs & Services
 → Credentials: add `https://<YOUR_DOMAIN>/api/auth/google/callback` as an
@@ -479,6 +543,20 @@ cat /opt/card2contact/.deployed_tag
   at low-traffic times.
 - Rotating `POSTGRES_PASSWORD` requires updating both `POSTGRES_PASSWORD` and
   `DATABASE_URL` in `.env` together, then restarting.
+- **Rotating `TOKEN_ENCRYPTION_KEY` is not a drop-in swap.** Existing tokens
+  were encrypted with the old key and cannot be decrypted with a new one. The
+  backend still boots (the key is validated for *length*, not correctness), but
+  every user's tokens read as absent and they all see "Reconnect Google" until
+  they re-consent. Nothing is corrupted and no contact data is lost, but it is
+  a visible, all-users event — plan it, or simply restore the old key to undo
+  it. If you must rotate, null the tokens deliberately so the state is honest
+  rather than mysterious:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml exec -T postgres \
+    psql -U c2c -d card2contact -c \
+    "UPDATE users SET access_token=NULL, refresh_token=NULL, token_expiry=NULL;"
+  ```
 
 ### Database backup and restore
 
