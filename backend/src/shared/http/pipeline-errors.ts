@@ -40,3 +40,26 @@ export class ReauthRequiredError extends Error {
     this.name = "ReauthRequiredError";
   }
 }
+
+/**
+ * Thrown when a request presents a session that was explicitly revoked — almost
+ * always Session Replacement (the user signed in on another device). Distinct
+ * from NotAuthenticatedError (never signed in): this user WAS signed in and was
+ * signed out elsewhere, so the frontend explains why rather than bouncing to
+ * /login silently. 401 with `code: "SESSION_REVOKED"`.
+ *
+ * Note this is raised by the session middleware, not by requireAuth: the
+ * endpoint that actually notices a revocation is the public
+ * GET /api/auth/google/status (refetched on window focus), which never passes
+ * through requireAuth. An expired session is NOT this error — expiry is not
+ * revocation, and degrades to anonymous instead.
+ */
+export class SessionRevokedError extends Error {
+  readonly code = "SESSION_REVOKED";
+  constructor(
+    message = "Your session was ended because you signed in on another device"
+  ) {
+    super(message);
+    this.name = "SessionRevokedError";
+  }
+}

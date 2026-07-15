@@ -4,6 +4,7 @@ import {
   NotAuthenticatedError,
   PipelineOrderError,
   ReauthRequiredError,
+  SessionRevokedError,
   ValidationError,
 } from "./pipeline-errors";
 
@@ -24,6 +25,12 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ReauthRequiredError) {
     // 401 with a machine-readable code so the frontend can prompt "reconnect"
     // rather than treating it as a generic auth failure.
+    res.status(401).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof SessionRevokedError) {
+    // Before NotAuthenticatedError: both are 401, and the specific case must
+    // win so the frontend can explain *why* the user was signed out.
     res.status(401).json({ error: err.message, code: err.code });
     return;
   }
