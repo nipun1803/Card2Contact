@@ -20,6 +20,7 @@ export const MULTI_VALUE_SEPARATOR = "; ";
  */
 export const SHEET_HEADER = [
   "Name",
+  "Designation",
   "Phone",
   "Email",
   "Company",
@@ -38,6 +39,7 @@ export const SPREADSHEET_TITLE = "Card2Contact Contacts";
 export function contactToRow(contact: Contact): string[] {
   return [
     contact.name,
+    contact.designation,
     contact.phones.join(MULTI_VALUE_SEPARATOR),
     contact.email,
     contact.company,

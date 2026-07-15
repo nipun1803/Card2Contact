@@ -61,6 +61,7 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
       cardId: "e2e-card-1",
       contact: {
         name: "Ada Lovelace",
+        designation: "Chief Analyst",
         phones: ["+15550101842"],
         email: "ada@analyticalengines.com",
         company: "Analytical Engines Inc",

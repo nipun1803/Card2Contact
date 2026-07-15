@@ -4,6 +4,7 @@ import { Contact } from "../../shared/types/contact";
 
 const base: Contact = {
   name: "Ada Lovelace",
+  designation: "Chief Analyst",
   phones: ["+1 555 111", "+1 555 222"],
   email: "ada@example.com",
   company: "Analytical Engines Inc",
@@ -17,6 +18,7 @@ describe("contactToRow", () => {
     const row = contactToRow(base);
     expect(row).toEqual([
       "Ada Lovelace",
+      "Chief Analyst",
       "+1 555 111; +1 555 222",
       "ada@example.com",
       "Analytical Engines Inc",
@@ -32,7 +34,7 @@ describe("contactToRow", () => {
 
   it("renders empty multi-value fields as empty strings", () => {
     const row = contactToRow({ ...base, phones: [], addresses: [] });
-    expect(row[1]).toBe("");
-    expect(row[4]).toBe("");
+    expect(row[2]).toBe("");
+    expect(row[5]).toBe("");
   });
 });

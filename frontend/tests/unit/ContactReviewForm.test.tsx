@@ -14,8 +14,23 @@ describe("ContactReviewForm", () => {
   it("prefills fields from the contact", () => {
     render(<ContactReviewForm contact={makeContact()} saving={false} onConfirm={vi.fn()} />);
     expect(screen.getByDisplayValue("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Chief Analyst")).toBeInTheDocument();
     expect(screen.getByDisplayValue("ada@analyticalengines.com")).toBeInTheDocument();
     expect(screen.getByDisplayValue("+1 555 010 1842")).toBeInTheDocument();
+  });
+
+  it("submits an edited designation", async () => {
+    const onConfirm = vi.fn();
+    const user = userEvent.setup();
+    render(<ContactReviewForm contact={makeContact()} saving={false} onConfirm={onConfirm} />);
+
+    const designationInput = screen.getByDisplayValue("Chief Analyst");
+    await user.clear(designationInput);
+    await user.type(designationInput, "Branch Head");
+    await user.click(screen.getByRole("button", { name: /save to google sheets/i }));
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledOnce());
+    expect(onConfirm.mock.calls[0][0].designation).toBe("Branch Head");
   });
 
   it("submits a Contact with trimmed name and empty array entries dropped", async () => {

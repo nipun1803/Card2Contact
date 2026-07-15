@@ -11,6 +11,7 @@ import { UserRecord } from "../../src/shared/store/user-store";
 export function makeContact(overrides: Partial<Contact> = {}): Contact {
   return {
     name: "Ada Lovelace",
+    designation: "Chief Analyst",
     phones: ["+1 555 010 1842"],
     email: "ada@analyticalengines.com",
     company: "Analytical Engines Inc",
@@ -78,4 +79,43 @@ export const OCR_SAMPLES = {
   nameOnly: "Alan Turing",
 
   empty: "",
+
+  /**
+   * Models a real reported bug: Mistral OCR markdown embedding the card's
+   * logo as an image ref ABOVE the name line, and rendering a stylized
+   * company wordmark as bold. Also exercises the designation field and two
+   * Indian-format phone numbers with different digit groupings.
+   */
+  markdownArtifacts: [
+    "![img-0.jpeg](img-0.jpeg)",
+    "",
+    "Sonia Arora",
+    "Branch Head",
+    "",
+    "**Infinity**",
+    "Flower Boutique",
+    "",
+    "+91 91876 54321",
+    "+91 22 6718 6718",
+    "",
+    "sonia.a@mail.web",
+  ].join("\n"),
+
+  /** A second real-card shape: designation before company-suffix line, US number. */
+  designationAndSuffix: [
+    "Marcus Chen",
+    "Vice President, Engineering",
+    "Nimbus Cloud Solutions Inc",
+    "marcus.chen@nimbuscloud.io",
+    "+1 (415) 555-0134",
+    "500 Market Street, Suite 12, San Francisco, CA 94105",
+  ].join("\n"),
+
+  /** A third real-card shape: no designation present, company has no legal suffix. */
+  noDesignation: [
+    "Priya Nair",
+    "Bloom & Co",
+    "priya@bloomandco.in",
+    "+91 98765 43210",
+  ].join("\n"),
 } as const;

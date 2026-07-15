@@ -5,6 +5,7 @@
  */
 export interface Contact {
   name: string;
+  designation: string;
   phones: string[];
   email: string;
   company: string;
@@ -18,6 +19,7 @@ export type ContactEdits = Partial<Contact>;
 export function createEmptyContact(): Contact {
   return {
     name: "",
+    designation: "",
     phones: [],
     email: "",
     company: "",

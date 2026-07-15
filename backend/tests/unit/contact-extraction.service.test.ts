@@ -10,10 +10,10 @@ import { makeCardSession, OCR_SAMPLES } from "../fixtures/contacts";
 
 /**
  * M3 — Contact Extraction. The technique is a documented, swappable placeholder
- * heuristic (docs/modules/M3 "Out of Scope"), so these tests pin the CURRENT
- * heuristic behavior — including one confirmed defect (see KNOWN BUG below) —
- * rather than an idealized spec. When the parser is replaced/fixed, the KNOWN
- * BUG assertion should flip to the `.todo` expectation.
+ * heuristic (docs/modules/M3 "Out of Scope"). These tests pin the CURRENT
+ * heuristic behavior across several realistic card shapes, including the
+ * reported bug where OCR Markdown artifacts (image refs, bold wordmarks)
+ * leaked verbatim into structured fields.
  */
 describe("parseContactFromText", () => {
   it("extracts the email (first RFC-ish match)", () => {
@@ -38,9 +38,7 @@ describe("parseContactFromText", () => {
 
   it("captures multiple phone numbers as a list", () => {
     const c = parseContactFromText(OCR_SAMPLES.multiPhone);
-    expect(c.phones.length).toBeGreaterThanOrEqual(2);
-    expect(c.phones.some((p) => p.includes("5550100"))).toBe(true);
-    expect(c.phones.some((p) => p.includes("5550199"))).toBe(true);
+    expect(c.phones).toEqual(["+1 202 555 0100", "+1 202 555 0199"]);
   });
 
   it("leaves note and category blank (not derivable from a plain card)", () => {
@@ -49,9 +47,15 @@ describe("parseContactFromText", () => {
     expect(c.category).toBe("");
   });
 
+  it("leaves designation blank when the card has no job-title line", () => {
+    const c = parseContactFromText(OCR_SAMPLES.simple);
+    expect(c.designation).toBe("");
+  });
+
   it("returns an all-blank contact for empty text", () => {
     const c = parseContactFromText(OCR_SAMPLES.empty);
     expect(c.name).toBe("");
+    expect(c.designation).toBe("");
     expect(c.email).toBe("");
     expect(c.phones).toEqual([]);
     expect(c.addresses).toEqual([]);
@@ -63,21 +67,94 @@ describe("parseContactFromText", () => {
     expect(c.email).toBe("");
   });
 
-  it("de-duplicates repeated phone numbers", () => {
-    const dupPhones = "Bob\n+1 555 999 0000\n+1 555 999 0000";
+  it("de-duplicates repeated phone numbers by canonical value, not display string", () => {
+    const dupPhones = "Bob\n+1 555 999 0000\n+1 (555) 999-0000";
     const c = parseContactFromText(dupPhones);
-    expect(c.phones).toEqual(["+15559990000"]);
+    expect(c.phones).toEqual(["+1 555 999 0000"]);
   });
 
-  /**
-   * Regression for the fixed cross-line bleed (was: the phone regex's `\s`
-   * matched the newline before "1 Mayfair Road", producing "+155501018421").
-   * The separator class now uses literal space/tab, so the phone stops at the
-   * line break and does NOT swallow the address's leading digit.
-   */
   it("does not bleed a following line's leading digit into the phone", () => {
     const c = parseContactFromText(OCR_SAMPLES.simple);
-    expect(c.phones).toEqual(["+15550101842"]);
+    expect(c.phones).toEqual(["+1 555 010 1842"]);
+  });
+
+  describe("Markdown artifact removal (reported bug)", () => {
+    const c = parseContactFromText(OCR_SAMPLES.markdownArtifacts);
+
+    it("drops an image-ref line entirely instead of using it as the name", () => {
+      expect(c.name).toBe("Sonia Arora");
+      expect(c.name).not.toContain("img-0.jpeg");
+      expect(c.name).not.toContain("![");
+    });
+
+    it("strips bold markdown asterisks from the company field", () => {
+      expect(c.company).not.toContain("*");
+    });
+
+    it("preserves the complete multi-line company name/wordmark", () => {
+      expect(c.company).toBe("Infinity Flower Boutique");
+    });
+
+    it("extracts the designation into its own field, separate from company", () => {
+      expect(c.designation).toBe("Branch Head");
+    });
+
+    it("normalizes and readably formats both phone numbers per their country grouping", () => {
+      expect(c.phones).toEqual(["+91 91876 54321", "+91 22 6718 6718"]);
+    });
+
+    it("extracts the email correctly despite surrounding artifacts", () => {
+      expect(c.email).toBe("sonia.a@mail.web");
+    });
+  });
+
+  describe("designation before a company-suffix line", () => {
+    const c = parseContactFromText(OCR_SAMPLES.designationAndSuffix);
+
+    it("extracts a multi-word designation distinct from the company", () => {
+      expect(c.designation).toBe("Vice President, Engineering");
+    });
+
+    it("still detects the company with its legal suffix intact", () => {
+      expect(c.company).toBe("Nimbus Cloud Solutions Inc");
+    });
+
+    it("formats a US number with standard grouping", () => {
+      expect(c.phones).toEqual(["+1 415 555 0134"]);
+    });
+
+    it("captures the full street address", () => {
+      expect(c.addresses).toEqual(["500 Market Street, Suite 12, San Francisco, CA 94105"]);
+    });
+  });
+
+  describe("card with no designation line", () => {
+    const c = parseContactFromText(OCR_SAMPLES.noDesignation);
+
+    it("leaves designation blank rather than guessing", () => {
+      expect(c.designation).toBe("");
+    });
+
+    it("still extracts a company without a legal suffix", () => {
+      expect(c.company).toBe("Bloom & Co");
+    });
+  });
+
+  describe("only actual card content is mapped to fields", () => {
+    it("does not map a bare URL/logo-caption line to any field", () => {
+      const text = "Jane Doe\nwww.example.com\nAcme Inc\njane@acme.com";
+      const c = parseContactFromText(text);
+      expect(c.name).toBe("Jane Doe");
+      expect(c.company).toBe("Acme Inc");
+      expect(JSON.stringify(c)).not.toContain("www.example.com");
+    });
+
+    it("does not map a symbol-only decorative line to any field", () => {
+      const text = "Jane Doe\n----------\nAcme Inc";
+      const c = parseContactFromText(text);
+      expect(c.name).toBe("Jane Doe");
+      expect(c.company).toBe("Acme Inc");
+    });
   });
 });
 

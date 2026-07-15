@@ -11,13 +11,14 @@ Shared infrastructure (not a pipeline module) that makes the app multi-user and 
 | `spreadsheet_id` | the user's auto-created sheet (null until first login provisions it) |
 | `access_token`, `refresh_token` | via the `TokenCodec` seam (plaintext now, encryptable later) |
 | `token_expiry` | epoch ms |
+| `saved_contacts_count` | incremented on each successful M5 save; surfaced via `/api/auth/google/status` |
 | `created_at`, `updated_at`, `last_login_at` | audit timestamps (debugging only, not read by app logic) |
 
 Schema is created idempotently at startup by `initSchemaWithRetry` (`shared/db/init.ts`); the pool lives in `shared/db/pool.ts`. There is deliberately **no header schema-version column** — header integrity is read-and-repair (see M5).
 
 ## UserStore (`shared/store/user-store.ts`)
 
-The only inter-module contract for identity + tokens; routers depend on the interface, not on Postgres (tests inject a fake). Key methods: `findById`, `upsertOnLogin` (sets `last_login_at`, `COALESCE`s the refresh token so re-login never wipes it), `updateTokens`, `setSpreadsheetId`, `clearTokens` (revoke recovery). `PgUserStore` runs tokens through the codec on write/read.
+The only inter-module contract for identity + tokens; routers depend on the interface, not on Postgres (tests inject a fake). Key methods: `findById`, `upsertOnLogin` (sets `last_login_at`, `COALESCE`s the refresh token so re-login never wipes it), `updateTokens`, `setSpreadsheetId`, `incrementSavedContactsCount` (called by M5 on each successful save), `clearTokens` (revoke recovery). `PgUserStore` runs tokens through the codec on write/read.
 
 ## TokenCodec seam (`shared/store/token-codec.ts`)
 

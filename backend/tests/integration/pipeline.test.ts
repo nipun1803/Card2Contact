@@ -16,6 +16,7 @@ import type { Express } from "express";
 
 const OCR_TEXT = [
   "Ada Lovelace",
+  "Chief Analyst",
   "Analytical Engines Inc",
   "ada@analyticalengines.com",
   "+1 555 010 1842",
@@ -72,6 +73,7 @@ describe("M1→M4 pipeline over HTTP", () => {
     const extract = await request(app).post(`/api/cards/${cardId}/extract`);
     expect(extract.status).toBe(200);
     expect(extract.body.contact.name).toBe("Ada Lovelace");
+    expect(extract.body.contact.designation).toBe("Chief Analyst");
     expect(extract.body.contact.email).toBe("ada@analyticalengines.com");
     expect(extract.body.contact.company).toBe("Analytical Engines Inc");
 

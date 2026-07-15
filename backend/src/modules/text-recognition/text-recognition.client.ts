@@ -44,10 +44,25 @@ export class MistralOcrClient implements OcrClient {
     });
 
     return (response.pages ?? [])
-      .map((page) => page.markdown ?? "")
+      .map((page) => stripMarkdown(page.markdown ?? ""))
       .join("\n")
       .trim();
   }
+}
+
+/**
+ * Mistral OCR's `markdown` field is genuinely Markdown, not plain text — it
+ * renders detected images/logos as `![alt](src)` and stylized/large text as
+ * `**bold**` or `*italic*`. M3's parser expects plain lines of card text, so
+ * strip Markdown syntax here rather than leaking it into extracted fields.
+ */
+function stripMarkdown(markdown: string): string {
+  return markdown
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // image refs — drop entirely, no text content
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links — keep the visible text
+    .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
+    .replace(/\*([^*]+)\*/g, "$1") // italic
+    .replace(/^#{1,6}\s+/gm, ""); // headings
 }
 
 /**

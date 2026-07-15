@@ -6,6 +6,7 @@ import type { AuthStatus } from "@/shared/types/api";
 export function makeContact(overrides: Partial<Contact> = {}): Contact {
   return {
     name: "Ada Lovelace",
+    designation: "Chief Analyst",
     phones: ["+1 555 010 1842"],
     email: "ada@analyticalengines.com",
     company: "Analytical Engines Inc",

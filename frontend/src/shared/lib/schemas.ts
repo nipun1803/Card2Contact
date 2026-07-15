@@ -8,6 +8,7 @@ import { z } from "zod";
  */
 export const contactSchema = z.object({
   name: z.string().trim().min(1, "Name is required"),
+  designation: z.string(),
   email: z.string(),
   company: z.string(),
   category: z.string(),

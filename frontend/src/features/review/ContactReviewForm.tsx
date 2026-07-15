@@ -28,6 +28,7 @@ interface ContactReviewFormProps {
 function toForm(contact: Contact): ContactFormValues {
   return {
     name: contact.name,
+    designation: contact.designation,
     email: contact.email,
     company: contact.company,
     category: contact.category,
@@ -41,6 +42,7 @@ function toForm(contact: Contact): ContactFormValues {
 function fromForm(values: ContactFormValues): Contact {
   return {
     name: values.name.trim(),
+    designation: values.designation,
     email: values.email,
     company: values.company,
     category: values.category,
@@ -86,6 +88,19 @@ export function ContactReviewForm({ contact, saving, error, onConfirm }: Contact
                     <Input placeholder="Full name" invalid={!!form.formState.errors.name} {...field} />
                   </FormControl>
                   <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="designation"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Designation</FormLabel>
+                  <FormControl>
+                    <Input placeholder="e.g. Branch Head" {...field} />
+                  </FormControl>
                 </FormItem>
               )}
             />
