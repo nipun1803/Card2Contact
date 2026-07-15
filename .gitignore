@@ -14,3 +14,5 @@ tests/e2e/.auth/
 
 # Postgres data (bind-mounted by docker-compose.yml / docker-compose.prod.yml)
 data/
+.claude/
+.claude-*/

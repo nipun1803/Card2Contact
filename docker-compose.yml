@@ -22,6 +22,8 @@ services:
       PORT: 4000
       DATABASE_URL: ${DATABASE_URL:-postgres://c2c:c2c@postgres:5432/card2contact}
       SESSION_SECRET: ${SESSION_SECRET}
+      # Required — the backend exits at boot without it. See .env.example.
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
