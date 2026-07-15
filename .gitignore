@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+# Captured interactive Google login for authenticated E2E — never commit
+tests/e2e/.auth/
+
+# Postgres data (bind-mounted by docker-compose.yml / docker-compose.prod.yml)
+data/
