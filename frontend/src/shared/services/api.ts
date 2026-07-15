@@ -41,6 +41,19 @@ export class ReauthError extends ApiError {
   }
 }
 
+/**
+ * A 401 whose body carries `code: "SESSION_REVOKED"` — this session was ended
+ * server-side, almost always because the user signed in on another device
+ * (single active session). Distinct from a plain 401 (never signed in): the UI
+ * explains why the user was signed out rather than bouncing silently to /login.
+ */
+export class SessionRevokedError extends ApiError {
+  constructor(message: string) {
+    super(401, message);
+    this.name = "SessionRevokedError";
+  }
+}
+
 /** A network-level failure (server unreachable, offline). */
 export class NetworkError extends Error {
   constructor(message = "Network request failed") {
@@ -61,6 +74,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     if (res.status === 401 && body.code === "REAUTH_REQUIRED") {
       throw new ReauthError(body.error ?? "Please reconnect Google");
+    }
+    if (res.status === 401 && body.code === "SESSION_REVOKED") {
+      throw new SessionRevokedError(
+        body.error ?? "You were signed out because you signed in on another device",
+      );
     }
     throw new ApiError(res.status, body.error ?? res.statusText);
   }
@@ -83,6 +101,22 @@ export async function logout(): Promise<void> {
 /** Full-page navigation into the backend's Google OAuth redirect flow. */
 export function googleSignInUrl(): string {
   return "/api/auth/google";
+}
+
+/**
+ * Session Conflict resolution. Both authenticate via the short-lived
+ * `c2c_pending` cookie the backend set during the OAuth callback — the caller
+ * has no Active Session yet, by construction.
+ */
+
+/** Confirm Session Replacement: activate this device, sign the other one out. */
+export async function continueSession(): Promise<void> {
+  await request<{ ok: true }>("/api/auth/session/continue", { method: "POST" });
+}
+
+/** Abandon this sign-in and leave the other device signed in. */
+export async function cancelSession(): Promise<void> {
+  await request<{ ok: true }>("/api/auth/session/cancel", { method: "POST" });
 }
 
 /* ---- Pipeline ------------------------------------------------------------ */

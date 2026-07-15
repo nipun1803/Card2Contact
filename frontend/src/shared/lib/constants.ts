@@ -6,6 +6,9 @@ export const ROUTES = {
   dashboard: "/dashboard",
   scan: "/app",
   profile: "/profile",
+  /** Session Conflict prompt — the OAuth callback redirects here when the user
+   *  already has an Active Session on another device. */
+  sessionConflict: "/session-conflict",
 } as const;
 
 /** Default title of the auto-provisioned spreadsheet (backend constant). */

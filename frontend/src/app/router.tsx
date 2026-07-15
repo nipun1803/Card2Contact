@@ -12,6 +12,7 @@ const Login = lazy(() => import("@/routes/Login"));
 const Dashboard = lazy(() => import("@/routes/Dashboard"));
 const ScanApp = lazy(() => import("@/routes/ScanApp"));
 const Profile = lazy(() => import("@/routes/Profile"));
+const SessionConflict = lazy(() => import("@/routes/SessionConflict"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 
 /** Suspense boundary used while a lazy page chunk loads. */
@@ -43,6 +44,19 @@ export const router = createBrowserRouter([
           { path: ROUTES.profile, element: <Lazy><Profile /></Lazy> },
         ],
       },
+    ],
+  },
+  /**
+   * Deliberately outside BOTH guards. The user arrives here mid-sign-in with a
+   * Pending Session and no Active one: PublicOnly would be wrong once they
+   * Continue (it bounces authenticated users away), and ProtectedRoute would be
+   * wrong before they do (they aren't signed in yet, so it would bounce them to
+   * /login and strand the pending session). The page owns its own navigation.
+   */
+  {
+    element: <PublicLayout />,
+    children: [
+      { path: ROUTES.sessionConflict, element: <Lazy><SessionConflict /></Lazy> },
     ],
   },
   { path: "/404", element: <Lazy><NotFound /></Lazy> },
