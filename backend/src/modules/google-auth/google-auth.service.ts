@@ -5,14 +5,22 @@ import { TokenSet } from "../../shared/store/user-store";
  * Scopes requested at login:
  * - openid/email/profile: identify the user (we read `sub` + `email` from the
  *   verified id_token) so each user maps to their own row + spreadsheet.
- * - spreadsheets: create and append to the user's own sheet (M5). This scope
- *   also covers spreadsheets the app itself creates, so no Drive scope is needed.
+ * - spreadsheets: create and append to the user's own sheet (M5).
+ * - drive.file: read the `trashed` flag on the sheet we created. The Sheets API
+ *   cannot tell us this — a trashed spreadsheet reads and writes normally and
+ *   never 404s — so without Drive we would silently append contacts to a bin
+ *   the user cannot see. drive.file is the narrowest scope that works: it
+ *   grants access ONLY to files this app created, never the user's wider Drive.
+ *
+ * Changing this list invalidates existing grants: `prompt: "consent"` below
+ * means every user re-consents on their next sign-in, which is what we want.
  */
 const SCOPES = [
   "openid",
   "email",
   "profile",
   "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/drive.file",
 ];
 
 /** Identity + tokens extracted from a completed OAuth login. */
