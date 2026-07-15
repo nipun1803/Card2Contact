@@ -11,11 +11,31 @@ export interface UserRecord {
   googleUserId: string;
   email: string;
   spreadsheetId: string | null;
+  /**
+   * The sheet's URL and title are stored rather than derived: Recreate Sheet
+   * must persist all three together, and a stale derived URL would point at a
+   * trashed spreadsheet. Null for rows created before these columns existed —
+   * callers fall back to deriving from spreadsheetId.
+   */
+  spreadsheetUrl: string | null;
+  spreadsheetTitle: string | null;
   accessToken: string | null;
   refreshToken: string | null;
   tokenExpiry: number | null; // epoch ms (google-auth-library Credentials.expiry_date)
   /** Running total of contacts this user has saved (M5), tracked in Postgres. */
   savedContactsCount: number;
+}
+
+/** Identifying details of a user's provisioned spreadsheet. */
+export interface SpreadsheetInfo {
+  id: string;
+  url: string;
+  title: string;
+}
+
+/** Canonical URL for a spreadsheet id — the fallback for pre-migration rows. */
+export function spreadsheetUrlFor(spreadsheetId: string): string {
+  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
 }
 
 /** Tokens supplied at login / refresh time. */
@@ -36,9 +56,15 @@ export interface UserStore {
   upsertOnLogin(input: { googleUserId: string; email: string } & TokenSet): Promise<UserRecord>;
   /** Persist tokens refreshed by the OAuth client mid-session. */
   updateTokens(googleUserId: string, tokens: TokenSet): Promise<void>;
-  /** Associate the user's auto-provisioned spreadsheet. */
-  setSpreadsheetId(googleUserId: string, spreadsheetId: string): Promise<void>;
-  /** Null out tokens (keep the row) when access is revoked/expired, so status can report needsReconnect. */
+  /** Associate the user's provisioned spreadsheet — id, url, and title together. */
+  setSpreadsheet(googleUserId: string, sheet: SpreadsheetInfo): Promise<void>;
+  /**
+   * Null out tokens (keep the row) when Google rejects them, so /status reports
+   * needsReconnect and the user sees the Reconnect prompt proactively rather
+   * than only discovering the problem mid-save. Called by the M5 router on
+   * ReauthRequiredError — the session deliberately survives, since losing
+   * Google access is not losing your card2contact session.
+   */
   clearTokens(googleUserId: string): Promise<void>;
   /** Atomically bump the running saved-contacts total by one; returns the new total. */
   incrementSavedContactsCount(googleUserId: string): Promise<number>;
@@ -48,11 +74,16 @@ interface UserRow {
   google_user_id: string;
   email: string;
   spreadsheet_id: string | null;
+  spreadsheet_url: string | null;
+  spreadsheet_title: string | null;
   access_token: string | null;
   refresh_token: string | null;
   token_expiry: string | null; // pg returns BIGINT as string
   saved_contacts_count: number;
 }
+
+const USER_COLUMNS = `google_user_id, email, spreadsheet_id, spreadsheet_url, spreadsheet_title,
+                      access_token, refresh_token, token_expiry, saved_contacts_count`;
 
 export class PgUserStore implements UserStore {
   constructor(
@@ -60,14 +91,44 @@ export class PgUserStore implements UserStore {
     private readonly codec: TokenCodec
   ) {}
 
+  /**
+   * Decode a stored token, degrading to null rather than throwing.
+   *
+   * Post-cutover every stored token is ciphertext, so a decode failure means
+   * the key rotated or the row was tampered with — never a routine case. But
+   * throwing here would escape through findById into the session middleware and
+   * 500 EVERY request, locking the user out with no way to recover. Treating it
+   * as "no token" instead routes them to the existing needsReconnect flow: one
+   * Reconnect and they're working again, and a wrong TOKEN_ENCRYPTION_KEY
+   * becomes a recoverable mass-Reconnect event rather than an outage.
+   *
+   * Logged loudly because this always indicates an operational problem — see
+   * the rollback notes for how a wrong-but-valid key presents.
+   */
+  private dec(stored: string | null, googleUserId: string, field: string): string | null {
+    if (stored === null) return null;
+    try {
+      return this.codec.decode(stored);
+    } catch {
+      console.error(
+        `[user-store] failed to decode ${field} for user ${googleUserId} — treating as absent (key rotation? tampering?)`
+      );
+      return null;
+    }
+  }
+
   private toRecord(row: UserRow): UserRecord {
     return {
       googleUserId: row.google_user_id,
       email: row.email,
       spreadsheetId: row.spreadsheet_id,
-      // Decode through the codec (pass-through today, decrypt once AES is wired).
-      accessToken: row.access_token === null ? null : this.codec.decode(row.access_token),
-      refreshToken: row.refresh_token === null ? null : this.codec.decode(row.refresh_token),
+      // Fall back to the derived URL for rows written before these columns.
+      spreadsheetUrl:
+        row.spreadsheet_url ??
+        (row.spreadsheet_id === null ? null : spreadsheetUrlFor(row.spreadsheet_id)),
+      spreadsheetTitle: row.spreadsheet_title,
+      accessToken: this.dec(row.access_token, row.google_user_id, "access_token"),
+      refreshToken: this.dec(row.refresh_token, row.google_user_id, "refresh_token"),
       tokenExpiry: row.token_expiry === null ? null : Number(row.token_expiry),
       savedContactsCount: row.saved_contacts_count,
     };
@@ -79,8 +140,7 @@ export class PgUserStore implements UserStore {
 
   async findById(googleUserId: string): Promise<UserRecord | null> {
     const { rows } = await this.pool.query<UserRow>(
-      `SELECT google_user_id, email, spreadsheet_id, access_token, refresh_token, token_expiry, saved_contacts_count
-         FROM users WHERE google_user_id = $1`,
+      `SELECT ${USER_COLUMNS} FROM users WHERE google_user_id = $1`,
       [googleUserId]
     );
     return rows.length ? this.toRecord(rows[0]) : null;
@@ -102,7 +162,7 @@ export class PgUserStore implements UserStore {
          token_expiry  = EXCLUDED.token_expiry,
          last_login_at = now(),
          updated_at    = now()
-       RETURNING google_user_id, email, spreadsheet_id, access_token, refresh_token, token_expiry, saved_contacts_count`,
+       RETURNING ${USER_COLUMNS}`,
       [
         input.googleUserId,
         input.email,
@@ -126,10 +186,14 @@ export class PgUserStore implements UserStore {
     );
   }
 
-  async setSpreadsheetId(googleUserId: string, spreadsheetId: string): Promise<void> {
+  async setSpreadsheet(googleUserId: string, sheet: SpreadsheetInfo): Promise<void> {
+    // All three together: a Recreate Sheet that updated the id but left a stale
+    // url would point the user at the spreadsheet we just abandoned.
     await this.pool.query(
-      `UPDATE users SET spreadsheet_id = $2, updated_at = now() WHERE google_user_id = $1`,
-      [googleUserId, spreadsheetId]
+      `UPDATE users SET spreadsheet_id = $2, spreadsheet_url = $3, spreadsheet_title = $4,
+                        updated_at = now()
+        WHERE google_user_id = $1`,
+      [googleUserId, sheet.id, sheet.url, sheet.title]
     );
   }
 
