@@ -156,6 +156,38 @@ describe("parseContactFromText", () => {
       expect(c.company).toBe("Acme Inc");
     });
   });
+
+  describe("multi-line address without a street/road keyword (reported bug)", () => {
+    const c = parseContactFromText(OCR_SAMPLES.multiLineAddress);
+
+    it("joins both address lines into a single complete entry", () => {
+      expect(c.addresses).toEqual(["4th Floor, Tower B, Cyber City, Gurugram 122002"]);
+    });
+
+    it("does not let the address lines bleed into name/company/designation", () => {
+      expect(c.name).toBe("Rahul Mehta");
+      expect(c.designation).toBe("Regional Sales Manager");
+      expect(c.company).toBe("Zenith Retail Pvt Ltd");
+    });
+  });
+
+  it("leaves addresses as an empty list when the card has no address at all", () => {
+    const c = parseContactFromText(OCR_SAMPLES.noAddress);
+    expect(c.addresses).toEqual([]);
+  });
+
+  it("does not mistake a phone number's digit run for a street number or postal code", () => {
+    const c = parseContactFromText(OCR_SAMPLES.multiPhone);
+    expect(c.addresses).toEqual(["1 Anchor Way, Arlington 22201"]);
+  });
+
+  it("keeps two blank-line-separated addresses as two separate list entries", () => {
+    const c = parseContactFromText(OCR_SAMPLES.twoAddresses);
+    expect(c.addresses).toEqual([
+      "10 Harbor St, Boston MA 02110",
+      "42 Wharf Ave, Brooklyn NY 11201",
+    ]);
+  });
 });
 
 describe("M3Service.extract", () => {

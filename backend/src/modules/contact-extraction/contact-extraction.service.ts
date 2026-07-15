@@ -50,11 +50,17 @@ export function parseContactFromText(rawText: string): Contact {
   // reaches this parser is scrubbed here too, so it never leaks into a field.
   const cleanedText = stripMarkdown(rawText);
 
-  const lines = cleanedText
+  // Blank-preserving line list — a blank OCR line is a real signal that two
+  // adjacent address-like lines belong to DIFFERENT address blocks (e.g. two
+  // office addresses on a double-sided card), so it's kept as an explicit
+  // group boundary for address grouping even though every other heuristic
+  // below only cares about non-blank lines.
+  const rawLines = cleanedText
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => !isNoiseLine(line));
+    .filter((line) => isNoiseLine(line) === false || line.length === 0);
+
+  const lines = rawLines.filter((line) => line.length > 0);
 
   // Email — first RFC-ish match wins; a field not found stays blank.
   const emailMatch = cleanedText.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
@@ -73,15 +79,23 @@ export function parseContactFromText(rawText: string): Contact {
       .filter((phone): phone is NormalizedPhone => phone !== null),
   );
 
+  // A line whose non-space characters are mostly digits is phone/numeric data
+  // (e.g. "Tel: +1 202 555 0100"), not a name/company/address line — computed
+  // once so both the name/company heuristics and the address heuristic agree
+  // on which lines are "phone lines" (otherwise a phone line's embedded digit
+  // run can be misread as a street number by the address heuristic).
+  const isMostlyDigits = (line: string): boolean => {
+    const digits = line.replace(/\D/g, "");
+    return digits.length >= line.replace(/\s/g, "").length * 0.5;
+  };
+
   // Lines "used up" by email/phone/address detection are poor name/company/
   // designation candidates, so exclude them from the line-based heuristics below.
   const emailLower = contact.email.toLowerCase();
   const textLines = lines.filter((line) => {
     if (emailLower && line.toLowerCase().includes(emailLower)) return false;
-    if (isAddressLike(line)) return false;
-    const digits = line.replace(/\D/g, "");
-    // Mostly-digit lines are phone/other numeric data, not names/companies.
-    return digits.length < line.replace(/\s/g, "").length * 0.5;
+    if (isMostlyDigits(line)) return false;
+    return !isAddressLike(line);
   });
 
   // Name — heuristic: the first remaining line that reads like a person's
@@ -115,9 +129,18 @@ export function parseContactFromText(rawText: string): Contact {
   }
 
   // Addresses — heuristic: lines that look like a street/postal address
-  // (contain a number followed by words, or a postal-code-ish token). Multiple
-  // addresses are captured as a list.
-  contact.addresses = dedupe(lines.filter((line) => isAddressLike(line)));
+  // (street number, postal code, or an address-y keyword/unit designator),
+  // excluding phone-number lines (a phone's digit run can otherwise look like
+  // a street number or postal code). A real address is often split across
+  // multiple consecutive OCR lines (e.g. "4th Floor, Tower B" then "Cyber
+  // City, Gurugram 122002") — each *run* of consecutive address-like lines is
+  // joined into one address entry. Grouping runs over `rawLines` (blanks
+  // included) rather than `lines`, so a blank OCR line acts as a hard
+  // separator between two distinct addresses (e.g. two office addresses on a
+  // double-sided card) instead of merging them into one entry.
+  contact.addresses = dedupe(
+    groupConsecutive(rawLines, (line) => line.length > 0 && !isMostlyDigits(line) && isAddressLike(line)),
+  );
 
   // Note and Category are not derivable from a plain business card via this
   // placeholder heuristic — left blank rather than guessed (§4).
@@ -175,15 +198,44 @@ function looksLikeDesignation(line: string): boolean {
   return DESIGNATION_KEYWORDS.test(line);
 }
 
+const ADDRESS_KEYWORDS =
+  /\b(street|st\.|avenue|ave\.?|road|rd\.?|blvd\.?|boulevard|suite|ste\.?|floor|fl\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?|tower|building|bldg\.?|sector|block|nagar|colony|apartments?|apt\.?)\b/i;
+
+/**
+ * A line "looks like" part of an address if it has a leading/ordinal street
+ * number ("1 Mayfair Road", "4th Floor"), a trailing postal-code-ish digit
+ * run ("...Gurugram 122002"), or a common address/unit keyword — any ONE
+ * signal is enough (unlike the old heuristic, which additionally required a
+ * keyword alongside a bare postal code, so a plain "City, PIN" line with no
+ * street-type word never matched).
+ */
 function isAddressLike(line: string): boolean {
-  // A leading/embedded street number followed by words, or a postal code token.
-  const hasStreetNumber = /\b\d{1,5}\s+[A-Za-z][A-Za-z.]*/.test(line);
-  const hasPostalCode = /\b\d{4,6}\b/.test(line) && /[A-Za-z]/.test(line);
-  const hasAddressKeyword =
-    /\b(street|st\.|avenue|ave\.?|road|rd\.?|blvd\.?|boulevard|suite|ste\.?|floor|fl\.?|drive|dr\.?|lane|ln\.?|way|court|ct\.?)\b/i.test(
-      line,
-    );
-  return (hasStreetNumber || hasPostalCode) && (hasAddressKeyword || hasStreetNumber);
+  const hasStreetNumber = /\b\d{1,5}(?:st|nd|rd|th)?\s+[A-Za-z][A-Za-z.]*/i.test(line);
+  const hasPostalCode = /\b\d{4,6}\b\s*$/.test(line.trim()) && /[A-Za-z]/.test(line);
+  return hasStreetNumber || hasPostalCode || ADDRESS_KEYWORDS.test(line);
+}
+
+/**
+ * Groups consecutive items matching `predicate` into single joined strings —
+ * used so a multi-line address (or similar) isn't truncated to whichever one
+ * line happened to match, while separate non-consecutive runs (e.g. two
+ * distinct addresses on a double-sided card) stay as separate entries.
+ */
+function groupConsecutive(items: string[], predicate: (item: string) => boolean): string[] {
+  const groups: string[] = [];
+  let current: string[] = [];
+  for (const item of items) {
+    if (predicate(item)) {
+      current.push(item);
+    } else if (current.length > 0) {
+      groups.push(current.join(", "));
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    groups.push(current.join(", "));
+  }
+  return groups;
 }
 
 interface NormalizedPhone {

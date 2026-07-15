@@ -118,4 +118,44 @@ export const OCR_SAMPLES = {
     "priya@bloomandco.in",
     "+91 98765 43210",
   ].join("\n"),
+
+  /**
+   * A real address split across two consecutive OCR lines with no
+   * street/road/etc. keyword on either line — only a floor/tower reference
+   * and a trailing city+postal-code. Must be joined into ONE address entry,
+   * not dropped or truncated to a single line.
+   */
+  multiLineAddress: [
+    "Rahul Mehta",
+    "Regional Sales Manager",
+    "Zenith Retail Pvt Ltd",
+    "rahul.mehta@zenithretail.in",
+    "+91 98111 22334",
+    "4th Floor, Tower B",
+    "Cyber City, Gurugram 122002",
+  ].join("\n"),
+
+  /** A card with no address at all — must leave `addresses` as an empty list. */
+  noAddress: [
+    "Kenji Sato",
+    "Product Designer",
+    "Studio Nine",
+    "kenji@studionine.jp",
+    "+81 3 1234 5678",
+  ].join("\n"),
+
+  /**
+   * Two distinct addresses separated by a blank OCR line (e.g. head office +
+   * branch office on one card). Must produce TWO separate address entries,
+   * not one merged string.
+   */
+  twoAddresses: [
+    "Lee Park",
+    "Harbor Consulting",
+    "lee@harborconsulting.com",
+    "+1 617 555 0111",
+    "10 Harbor St, Boston MA 02110",
+    "",
+    "42 Wharf Ave, Brooklyn NY 11201",
+  ].join("\n"),
 } as const;
