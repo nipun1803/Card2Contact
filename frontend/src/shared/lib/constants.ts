@@ -15,11 +15,22 @@ export const ROUTES = {
   adminLogin: "/admin/login",
   adminDashboard: "/admin/dashboard",
   adminUsers: "/admin/users",
+  adminLicenses: "/admin/licenses",
+  adminTiers: "/admin/tiers",
+  adminRequests: "/admin/requests",
+  adminLicenseSettings: "/admin/license-settings",
+  /** The admin's own account — identity, appearance, and Admin Session info. Distinct from adminLicenseSettings (global config). */
+  adminAccount: "/admin/account",
 } as const;
 
 /** Admin User Management: detail page path for a given user. */
 export function adminUserDetailPath(googleUserId: string): string {
   return `/admin/users/${googleUserId}`;
+}
+
+/** License Management: per-user quota detail page path. */
+export function adminLicenseDetailPath(googleUserId: string): string {
+  return `/admin/licenses/${googleUserId}`;
 }
 
 /** Default title of the auto-provisioned spreadsheet (backend constant). */

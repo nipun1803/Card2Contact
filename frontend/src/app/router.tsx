@@ -19,6 +19,12 @@ const AdminLogin = lazy(() => import("@/routes/admin/AdminLogin"));
 const AdminDashboard = lazy(() => import("@/routes/admin/AdminDashboard"));
 const AdminUsers = lazy(() => import("@/routes/admin/AdminUsers"));
 const AdminUserDetail = lazy(() => import("@/routes/admin/AdminUserDetail"));
+const AdminLicenses = lazy(() => import("@/routes/admin/AdminLicenses"));
+const AdminLicenseDetail = lazy(() => import("@/routes/admin/AdminLicenseDetail"));
+const AdminTiers = lazy(() => import("@/routes/admin/AdminTiers"));
+const AdminRequests = lazy(() => import("@/routes/admin/AdminRequests"));
+const AdminLicenseSettings = lazy(() => import("@/routes/admin/AdminLicenseSettings"));
+const AdminAccount = lazy(() => import("@/routes/admin/AdminAccount"));
 
 /** Suspense boundary used while a lazy page chunk loads. */
 function Lazy({ children }: { children: React.ReactNode }) {
@@ -92,6 +98,12 @@ export const router = createBrowserRouter([
           { path: ROUTES.adminDashboard, element: <Navigate to={ROUTES.adminUsers} replace /> },
           { path: ROUTES.adminUsers, element: <Lazy><AdminUsers /></Lazy> },
           { path: "/admin/users/:googleUserId", element: <Lazy><AdminUserDetail /></Lazy> },
+          { path: ROUTES.adminLicenses, element: <Lazy><AdminLicenses /></Lazy> },
+          { path: "/admin/licenses/:googleUserId", element: <Lazy><AdminLicenseDetail /></Lazy> },
+          { path: ROUTES.adminTiers, element: <Lazy><AdminTiers /></Lazy> },
+          { path: ROUTES.adminRequests, element: <Lazy><AdminRequests /></Lazy> },
+          { path: ROUTES.adminLicenseSettings, element: <Lazy><AdminLicenseSettings /></Lazy> },
+          { path: ROUTES.adminAccount, element: <Lazy><AdminAccount /></Lazy> },
         ],
       },
     ],

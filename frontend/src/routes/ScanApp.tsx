@@ -9,6 +9,7 @@ import { useCardPipeline, type PipelineStatus } from "@/features/scan/useCardPip
 import { PipelineLoader } from "@/features/scan/PipelineLoader";
 import { SaveSuccess } from "@/features/review/SaveSuccess";
 import { ReconnectPanel } from "@/features/auth/ReconnectPanel";
+import { ScanLimitPanel } from "@/features/scan/ScanLimitPanel";
 import { useSheetStatus } from "@/features/sheets/useSheetStatus";
 
 // Heavy sub-flows (camera/dropzone, and the RHF+Zod review form) load on demand.
@@ -53,11 +54,14 @@ export default function ScanApp() {
 
   return (
     <PageContainer width="narrow">
-      {status !== "done" && status !== "reconnect" && (
-        <div className="mb-8">
-          <StepIndicator steps={WORKFLOW_STEPS} current={stepIndex(status)} />
-        </div>
-      )}
+      {status !== "done" &&
+        status !== "reconnect" &&
+        status !== "quotaExceeded" &&
+        status !== "scanBlocked" && (
+          <div className="mb-8">
+            <StepIndicator steps={WORKFLOW_STEPS} current={stepIndex(status)} />
+          </div>
+        )}
 
       <PageTransition>
         {(status === "capture" || status === "submitting") && (
@@ -100,6 +104,10 @@ export default function ScanApp() {
         {status === "reconnect" && (
           <ReconnectPanel note="Your Google access expired before we could save. Reconnect, then scan the card again." />
         )}
+
+        {status === "quotaExceeded" && <ScanLimitPanel kind="quota" onBack={reset} />}
+
+        {status === "scanBlocked" && <ScanLimitPanel kind="blocked" onBack={reset} />}
       </PageTransition>
     </PageContainer>
   );

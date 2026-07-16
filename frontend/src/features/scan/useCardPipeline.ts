@@ -3,7 +3,9 @@ import { toast } from "sonner";
 import {
   ApiError,
   NetworkError,
+  QuotaExceededError,
   ReauthError,
+  ScanBlockedError,
   confirmContact,
   extractContact,
   recognizeCard,
@@ -35,7 +37,10 @@ export type PipelineStatus =
   | "review"
   | "saving"
   | "done"
-  | "reconnect";
+  | "reconnect"
+  // Scan quota gating (License Management): a signed-in user was refused at OCR.
+  | "quotaExceeded" // 402 — out of allowance, resolvable by an admin grant/tier
+  | "scanBlocked"; // 403 SCAN_BLOCKED — admin blocked this user's scanning
 
 interface PipelineState {
   status: PipelineStatus;
@@ -53,6 +58,8 @@ type Action =
   | { type: "SAVING"; contact: Contact }
   | { type: "DONE" }
   | { type: "RECONNECT" }
+  | { type: "QUOTA_EXCEEDED" }
+  | { type: "SCAN_BLOCKED" }
   | { type: "ERROR"; status: PipelineStatus; message: string }
   | { type: "RESET" };
 
@@ -79,6 +86,10 @@ function reducer(state: PipelineState, action: Action): PipelineState {
       return { ...state, status: "done" };
     case "RECONNECT":
       return { ...state, status: "reconnect" };
+    case "QUOTA_EXCEEDED":
+      return { ...state, status: "quotaExceeded" };
+    case "SCAN_BLOCKED":
+      return { ...state, status: "scanBlocked" };
     case "ERROR":
       return { ...state, status: action.status, error: action.message };
     case "RESET":
@@ -118,6 +129,16 @@ export function useCardPipeline() {
         const { contact } = await extractContact(cardId);
         dispatch({ type: "REVIEW", contact });
       } catch (err) {
+        // Quota gating first — a 402/403 here is a definitive "you can't scan",
+        // routed to a dedicated panel (no toast, no retry), like RECONNECT.
+        if (err instanceof QuotaExceededError) {
+          dispatch({ type: "QUOTA_EXCEEDED" });
+          return;
+        }
+        if (err instanceof ScanBlockedError) {
+          dispatch({ type: "SCAN_BLOCKED" });
+          return;
+        }
         if (isSessionLost(err)) {
           toast.error("That scan session expired. Please start over.");
           dispatch({ type: "RESET" });

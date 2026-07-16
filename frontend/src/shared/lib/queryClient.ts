@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/shared/services/api";
-import type { ListUsersQuery } from "@/shared/services/api";
+import type { ListLicensesQuery, ListUsersQuery } from "@/shared/services/api";
 
 /**
  * Single QueryClient. The only real query in this app is auth status; the
@@ -47,4 +47,20 @@ export const queryKeys = {
   adminUser: (id: string) => ["admin-user", id] as const,
   adminUserAudit: (id: string, cursor: string | undefined) =>
     ["admin-user-audit", id, cursor] as const,
+  /** License Management (Phase 4/5). */
+  adminLicenses: (query: ListLicensesQuery) => ["admin-licenses", query] as const,
+  adminLicense: (id: string) => ["admin-license", id] as const,
+  adminLicenseHistory: (id: string, cursor: string | undefined) =>
+    ["admin-license-history", id, cursor] as const,
+  adminTierHistory: (id: string, cursor: string | undefined) =>
+    ["admin-tier-history", id, cursor] as const,
+  adminTiers: (search: string | undefined) => ["admin-tiers", search] as const,
+  licenseSettings: ["license-settings"] as const,
+  /** Tier Upgrade Requests (admin queue + per-user + badge count). */
+  adminRequests: (status: string | undefined) => ["admin-requests", status] as const,
+  adminRequestCount: ["admin-request-count"] as const,
+  adminUserRequests: (id: string) => ["admin-user-requests", id] as const,
+  /** User-facing "Your Plan" + the user's own request history. */
+  myPlan: ["my-plan"] as const,
+  myRequests: ["my-requests"] as const,
 };

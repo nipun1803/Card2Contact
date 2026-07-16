@@ -34,6 +34,8 @@ import {
   saveContact,
   ApiError,
   ReauthError,
+  QuotaExceededError,
+  ScanBlockedError,
 } from "@/shared/services/api";
 import { makeContact, makeImageFile } from "../fixtures/contacts";
 
@@ -98,6 +100,30 @@ describe("useCardPipeline.submit", () => {
 
     await waitFor(() => expect(result.current.state.status).toBe("capture"));
     expect(result.current.state.cardId).toBeNull();
+  });
+
+  it("routes to the quotaExceeded state on a 402 at recognize", async () => {
+    mocked.submitCard.mockResolvedValue({ cardId: "card-1", mode: "single" });
+    mocked.recognizeCard.mockRejectedValue(new QuotaExceededError("out of scans"));
+
+    const { result } = renderPipeline();
+    await act(async () => {
+      await result.current.submit("single", makeImageFile(), null);
+    });
+
+    await waitFor(() => expect(result.current.state.status).toBe("quotaExceeded"));
+  });
+
+  it("routes to the scanBlocked state on a 403 SCAN_BLOCKED at recognize", async () => {
+    mocked.submitCard.mockResolvedValue({ cardId: "card-1", mode: "single" });
+    mocked.recognizeCard.mockRejectedValue(new ScanBlockedError("blocked"));
+
+    const { result } = renderPipeline();
+    await act(async () => {
+      await result.current.submit("single", makeImageFile(), null);
+    });
+
+    await waitFor(() => expect(result.current.state.status).toBe("scanBlocked"));
   });
 });
 

@@ -40,6 +40,14 @@ export interface MockOptions {
   adminUsers?: MockAdminUser[];
   /** Make POST /admin/users/:id/force-logout 500, to test the dialog's error UI. */
   adminForceLogoutFails?: boolean;
+
+  /**
+   * License Management (Phase 5). When set, the M2 recognize call is refused
+   * with the matching code — drives the scan-gating panels.
+   *  - "quota"   → 402 QUOTA_EXCEEDED
+   *  - "blocked" → 403 SCAN_BLOCKED
+   */
+  scanRefusal?: "quota" | "blocked";
 }
 
 /** Mirrors AdminUserSummary/AdminUserDetail (src/shared/types/api.ts). */
@@ -90,6 +98,7 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     adminNotConfigured = false,
     adminUsers = [],
     adminForceLogoutFails = false,
+    scanRefusal,
   } = opts;
 
   // Mutable so a spec can disable/restore a user across the journey.
@@ -277,6 +286,125 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     return json(route, 200, { data: { ...toSummary(u), activeSession: u.activeSession ?? null } });
   });
 
+  /* ---- License Management (Phase 5) --------------------------------------
+   * A small stateful tier catalog + a single quota, enough to drive the admin
+   * license pages end-to-end. Mirrors the {data, meta?} envelope exactly.
+   */
+  const tiers = [
+    { id: 1, name: "Free", isUnlimited: false, scanLimit: 30, validityDays: null, isDefault: true, sortOrder: 0, archivedAt: null, updatedAt: "2026-01-01T00:00:00Z", updatedBy: null, assignedCount: 0 },
+    { id: 2, name: "Professional", isUnlimited: false, scanLimit: 1000, validityDays: 365, isDefault: false, sortOrder: 1, archivedAt: null, updatedAt: "2026-01-01T00:00:00Z", updatedBy: null, assignedCount: 0 },
+    { id: 3, name: "Enterprise", isUnlimited: true, scanLimit: null, validityDays: 365, isDefault: false, sortOrder: 2, archivedAt: null, updatedAt: "2026-01-01T00:00:00Z", updatedBy: null, assignedCount: 0 },
+  ];
+  let nextTierId = 4;
+  const licenseUser = "u1";
+  const quota = {
+    googleUserId: licenseUser,
+    freeLimit: 30,
+    freeUsed: 0,
+    freeRemaining: 30,
+    hasFreeOverride: false,
+    paidRemaining: 0,
+    totalRemaining: 30,
+    scanBlocked: false,
+    scanBlockedAt: null as string | null,
+    scanBlockedBy: null as string | null,
+    unlimited: false,
+    activeTier: null as { tierId: number; name: string; unlimited: boolean; unlimitedUntil: string | null; expiresAt: string | null } | null,
+    paidGrants: [] as unknown[],
+  };
+
+  await page.route("**/api/admin/licenses/settings", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    return json(route, 200, {
+      data: {
+        defaultFreeLimit: 30,
+        defaultPaidLimit: 0,
+        freeEnabled: true,
+        paidEnabled: true,
+        enforcementEnabled: true,
+        updatedAt: "2026-01-01T00:00:00Z",
+        updatedBy: null,
+      },
+    });
+  });
+
+  await page.route("**/api/admin/licenses/tiers", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    if (route.request().method() === "POST") {
+      const body = JSON.parse(route.request().postData() ?? "{}");
+      const tier = { id: nextTierId++, name: body.name, isUnlimited: !!body.isUnlimited, scanLimit: body.isUnlimited ? null : body.scanLimit, validityDays: body.validityDays ?? null, isDefault: false, sortOrder: 99, archivedAt: null, updatedAt: "2026-01-01T00:00:00Z", updatedBy: "admin", assignedCount: 0 };
+      tiers.push(tier);
+      return json(route, 201, { data: tier });
+    }
+    return json(route, 200, { data: { tiers } });
+  });
+
+  await page.route("**/api/admin/licenses/tiers/*/clone", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const body = JSON.parse(route.request().postData() ?? "{}");
+    const src = tiers.find((t) => t.id === Number(route.request().url().split("/").at(-2)));
+    const tier = { ...(src ?? tiers[0]), id: nextTierId++, name: body.name, isDefault: false, assignedCount: 0 };
+    tiers.push(tier);
+    return json(route, 201, { data: tier });
+  });
+
+  await page.route("**/api/admin/licenses/tiers/*", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const id = Number(new URL(route.request().url()).pathname.split("/").at(-1));
+    const tier = tiers.find((t) => t.id === id);
+    if (route.request().method() === "DELETE") {
+      if (tier?.isDefault) {
+        return json(route, 400, { error: "cannot archive the default tier", code: "LICENSE_INVALID" });
+      }
+      return route.fulfill({ status: 204, body: "" });
+    }
+    if (route.request().method() === "PATCH" && tier) {
+      Object.assign(tier, JSON.parse(route.request().postData() ?? "{}"));
+      return json(route, 200, { data: tier });
+    }
+    return json(route, 404, { error: "Tier not found", code: "TIER_NOT_FOUND" });
+  });
+
+  await page.route("**/api/admin/licenses/quotas?*", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    return json(route, 200, {
+      data: {
+        quotas: [quota],
+        stats: { usersWithQuota: 1, scanBlocked: quota.scanBlocked ? 1 : 0, totalFreeUsed: quota.freeUsed, totalPaidUsed: 0, lowRemaining: 0 },
+      },
+      meta: { page: { total: 1, totalPages: 1, nextCursor: null, limit: 20 } },
+    });
+  });
+
+  await page.route("**/api/admin/licenses/quotas/*/tier", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    if (route.request().method() === "POST") {
+      const { tierId } = JSON.parse(route.request().postData() ?? "{}");
+      const tier = tiers.find((t) => t.id === tierId)!;
+      quota.activeTier = { tierId: tier.id, name: tier.name, unlimited: tier.isUnlimited, unlimitedUntil: null, expiresAt: null };
+      quota.unlimited = tier.isUnlimited;
+    } else {
+      quota.activeTier = null;
+      quota.unlimited = false;
+    }
+    return json(route, 200, { data: quota });
+  });
+
+  await page.route("**/api/admin/licenses/quotas/*/tier-history", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    return json(route, 200, { data: { entries: [] }, meta: { page: { total: 0, totalPages: 0, nextCursor: null, limit: 20 } } });
+  });
+
+  await page.route("**/api/admin/licenses/quotas/*/history", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    return json(route, 200, { data: { entries: [] }, meta: { page: { total: 0, totalPages: 0, nextCursor: null, limit: 20 } } });
+  });
+
+  await page.route("**/api/admin/licenses/quotas/*", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    return json(route, 200, { data: quota });
+  });
+
   const revoked = (route: Route) =>
     json(route, 401, {
       error: "Your session was ended because you signed in on another device",
@@ -317,10 +445,22 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     return json(route, 201, { cardId: "e2e-card-1", mode: "single" });
   });
 
-  // M2 recognize
-  await page.route("**/api/cards/*/recognize", (route) =>
-    json(route, 200, { cardId: "e2e-card-1", rawText: "Ada Lovelace\nAnalytical Engines Inc" }),
-  );
+  // M2 recognize — refused when scanRefusal is set (License Management gating).
+  await page.route("**/api/cards/*/recognize", (route) => {
+    if (scanRefusal === "quota") {
+      return json(route, 402, {
+        error: "Scan quota exhausted — contact your administrator",
+        code: "QUOTA_EXCEEDED",
+      });
+    }
+    if (scanRefusal === "blocked") {
+      return json(route, 403, {
+        error: "Scanning is blocked for your account — contact your administrator",
+        code: "SCAN_BLOCKED",
+      });
+    }
+    return json(route, 200, { cardId: "e2e-card-1", rawText: "Ada Lovelace\nAnalytical Engines Inc" });
+  });
 
   // M3 extract
   await page.route("**/api/cards/*/extract", (route) =>

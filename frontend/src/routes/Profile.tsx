@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LogOut, Mail, Moon, Sun, Trash2 } from "lucide-react";
+import { LogOut, Mail, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageContainer } from "@/shared/components/common/PageContainer";
 import { PageHeader } from "@/shared/components/common/PageHeader";
@@ -10,7 +10,8 @@ import { Button } from "@/shared/components/ui/button";
 import { Avatar, AvatarFallback } from "@/shared/components/ui/avatar";
 import { useAuth, useAuthActions } from "@/features/auth/useAuth";
 import { SheetStatusCard } from "@/features/sheets/SheetStatusCard";
-import { useTheme } from "@/app/ThemeProvider";
+import { PlanCard } from "@/features/plan/PlanCard";
+import { MyRequestsCard } from "@/features/plan/MyRequestsCard";
 import { clearRecentScans } from "@/shared/services/recentScans";
 import { ROUTES } from "@/shared/lib/constants";
 import { initials } from "@/shared/utils/format";
@@ -19,7 +20,6 @@ import { initials } from "@/shared/utils/format";
 export default function Profile() {
   const { email } = useAuth();
   const { logout } = useAuthActions();
-  const { theme, toggleTheme, canToggle } = useTheme();
   const navigate = useNavigate();
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -67,26 +67,12 @@ export default function Profile() {
           </CardContent>
         </Card>
 
-        {/* Google Sheet */}
-        <SheetStatusCard />
-
         {/* Preferences */}
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Preferences</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium">Appearance</p>
-                <p className="text-sm text-muted-foreground">
-                  {canToggle ? "Switch between light and dark." : "Dark mode is disabled."}
-                </p>
-              </div>
-              <Button variant="secondary" size="icon" onClick={toggleTheme} disabled={!canToggle} aria-label="Toggle theme">
-                {theme === "dark" ? <Sun aria-hidden /> : <Moon aria-hidden />}
-              </Button>
-            </div>
+          <CardContent>
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="text-sm font-medium">Recent scans</p>
@@ -106,6 +92,15 @@ export default function Profile() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Your Plan — scan allowance, tier, and upgrade requests */}
+        <PlanCard />
+
+        {/* Google Sheet */}
+        <SheetStatusCard />
+
+        {/* Full history of the user's own upgrade requests */}
+        <MyRequestsCard />
       </div>
 
       <ConfirmDialog

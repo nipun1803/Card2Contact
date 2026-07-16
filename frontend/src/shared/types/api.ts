@@ -144,3 +144,233 @@ export interface AdminAuditResponse {
   data: { entries: AdminAuditEntry[] };
   meta: { page: PageMeta };
 }
+
+/* ---- License Management (Phase 4/5) --------------------------------------
+ * Mirror the backend serializers in admin-licenses.router.ts exactly. The
+ * {data, meta?} envelope convention extends to /api/admin/licenses*.
+ */
+
+export interface LicenseSettings {
+  defaultFreeLimit: number;
+  defaultPaidLimit: number;
+  freeEnabled: boolean;
+  paidEnabled: boolean;
+  enforcementEnabled: boolean;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+export type LicenseSettingsPatch = Partial<
+  Pick<
+    LicenseSettings,
+    "defaultFreeLimit" | "defaultPaidLimit" | "freeEnabled" | "paidEnabled" | "enforcementEnabled"
+  >
+>;
+export interface LicenseSettingsResponse {
+  data: LicenseSettings;
+}
+
+export interface PaidGrant {
+  id: number;
+  amount: number;
+  used: number;
+  remaining: number;
+  expiresAt: string | null;
+  grantedAt: string;
+  grantedBy: string;
+  status: "active" | "expired" | "revoked";
+  reason: string | null;
+}
+
+export interface ActiveTier {
+  tierId: number | null;
+  name: string;
+  unlimited: boolean;
+  unlimitedUntil: string | null;
+  expiresAt: string | null;
+}
+
+export interface EffectiveQuota {
+  googleUserId: string;
+  /** The user's email for admin display; null when unknown (fall back to the id). */
+  email: string | null;
+  freeLimit: number;
+  freeUsed: number;
+  freeRemaining: number;
+  hasFreeOverride: boolean;
+  paidRemaining: number;
+  totalRemaining: number;
+  scanBlocked: boolean;
+  scanBlockedAt: string | null;
+  scanBlockedBy: string | null;
+  unlimited: boolean;
+  activeTier: ActiveTier | null;
+  paidGrants: PaidGrant[];
+}
+
+export interface QuotaStats {
+  usersWithQuota: number;
+  scanBlocked: number;
+  totalFreeUsed: number;
+  totalPaidUsed: number;
+  lowRemaining: number;
+}
+
+export interface LicenseListResponse {
+  data: { quotas: EffectiveQuota[]; stats: QuotaStats };
+  meta: { page: PageMeta };
+}
+export interface LicenseDetailResponse {
+  data: EffectiveQuota;
+}
+
+export interface QuotaLedgerEntry {
+  id: number;
+  ts: string;
+  kind: string;
+  pool: "free" | "paid" | "unlimited" | null;
+  grantId: number | null;
+  delta: number | null;
+  reason: string | null;
+  adminUsername: string | null;
+}
+export interface LicenseHistoryResponse {
+  data: { entries: QuotaLedgerEntry[] };
+  meta: { page: PageMeta };
+}
+
+export interface TierAssignmentEntry {
+  id: number;
+  tierId: number | null;
+  tierName: string | null;
+  isUnlimited: boolean | null;
+  scanLimit: number | null;
+  validityDays: number | null;
+  expiresAt: string | null;
+  previousTierId: number | null;
+  previousTierName: string | null;
+  action: "assigned" | "changed" | "removed";
+  assignedBy: string | null;
+  assignedAt: string;
+}
+export interface TierHistoryResponse {
+  data: { entries: TierAssignmentEntry[] };
+  meta: { page: PageMeta };
+}
+
+export interface Tier {
+  id: number;
+  name: string;
+  isUnlimited: boolean;
+  scanLimit: number | null;
+  validityDays: number | null;
+  isDefault: boolean;
+  sortOrder: number;
+  archivedAt: string | null;
+  updatedAt: string;
+  updatedBy: string | null;
+  /** Present on the list endpoint: how many users currently hold this tier. */
+  assignedCount?: number;
+}
+export interface TierInput {
+  name: string;
+  isUnlimited: boolean;
+  scanLimit: number | null;
+  validityDays: number | null;
+  sortOrder?: number;
+}
+export interface TierListResponse {
+  data: { tiers: Tier[] };
+}
+export interface TierResponse {
+  data: Tier;
+}
+
+/* ---- Tier Upgrade Requests ----------------------------------------------- */
+
+export type TierRequestKind = "tier" | "custom";
+export type TierRequestStatus = "pending" | "approved" | "rejected";
+
+export interface TierRequest {
+  id: number;
+  /** Present on the admin queue; omitted from the user's own view. */
+  googleUserId?: string;
+  /** The user's email for admin display; null when unknown (fall back to the id). */
+  email?: string | null;
+  kind: TierRequestKind;
+  requestedTierId: number | null;
+  requestedTierName: string | null;
+  requestedAmount: number | null;
+  requestedDays: number | null;
+  userNote: string | null;
+  currentTierName: string | null;
+  status: TierRequestStatus;
+  /** Admin who decided (admin queue only). */
+  decidedBy?: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+  grantedTierId: number | null;
+  grantedAmount: number | null;
+  grantedDays: number | null;
+  createdAt: string;
+}
+
+/** A tier as a user sees it in the upgrade picker — no internal fields. */
+export interface PublicTier {
+  id: number;
+  name: string;
+  isUnlimited: boolean;
+  scanLimit: number | null;
+  validityDays: number | null;
+  isDefault: boolean;
+}
+
+/** The user's own quota (a trimmed EffectiveQuota — no admin-only fields). */
+export interface MyQuota {
+  freeLimit: number;
+  freeUsed: number;
+  freeRemaining: number;
+  paidRemaining: number;
+  totalRemaining: number;
+  unlimited: boolean;
+  scanBlocked: boolean;
+  activeTier: ActiveTier | null;
+  paidGrants: Array<Pick<PaidGrant, "id" | "amount" | "used" | "remaining" | "expiresAt" | "status">>;
+}
+
+export interface MyPlanResponse {
+  data: {
+    quota: MyQuota;
+    availableTiers: PublicTier[];
+    pendingRequest: TierRequest | null;
+    recentRequests: TierRequest[];
+  };
+}
+export interface MyRequestsResponse {
+  data: { requests: TierRequest[] };
+}
+export interface TierRequestResponse {
+  data: TierRequest;
+}
+
+export interface CreateRequestInput {
+  kind: TierRequestKind;
+  tierId?: number | null;
+  amount?: number | null;
+  days?: number | null;
+  note?: string | null;
+}
+
+export interface ApproveOverrideInput {
+  tierId?: number | null;
+  amount?: number | null;
+  days?: number | null;
+  note?: string | null;
+}
+
+export interface AdminRequestListResponse {
+  data: { requests: TierRequest[]; pendingCount: number };
+  meta: { page: PageMeta };
+}
+export interface AdminApproveResponse {
+  data: { request: TierRequest; quota: EffectiveQuota };
+}

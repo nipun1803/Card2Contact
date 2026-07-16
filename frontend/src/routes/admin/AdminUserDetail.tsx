@@ -4,14 +4,15 @@ import { ArrowLeft } from "lucide-react";
 import { useAdminUserActions, useAdminUserAudit, useAdminUserDetail } from "@/features/admin/useAdminUsers";
 import { StatusBadge } from "@/shared/components/common/StatusBadge";
 import { ConfirmDialog } from "@/shared/components/common/ConfirmDialog";
-import { Pagination } from "@/shared/components/common/Pagination";
-import { EmptyState } from "@/shared/components/common/EmptyState";
+import { HistoryList } from "@/shared/components/common/HistoryList";
 import { ErrorState } from "@/shared/components/common/ErrorState";
 import { AppSplash } from "@/shared/components/common/AppSplash";
 import { PageContainer } from "@/shared/components/common/PageContainer";
+import { PageHeader } from "@/shared/components/common/PageHeader";
+import { Row } from "@/shared/components/common/Row";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/components/ui/card";
 import { Button } from "@/shared/components/ui/button";
-import { ROUTES } from "@/shared/lib/constants";
+import { ROUTES, adminLicenseDetailPath } from "@/shared/lib/constants";
 import { AUDIT_EVENT_LABELS } from "@/shared/lib/auditEventLabels";
 
 type DialogKind = "disable" | "restore" | "forceLogout" | null;
@@ -75,13 +76,21 @@ export default function AdminUserDetail() {
           Back to User Directory
         </Link>
 
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">{user.email}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">{user.googleUserId}</p>
-          </div>
-          <StatusBadge disabled={user.disabled} />
-        </div>
+        <PageHeader
+          title={user.email}
+          description={user.googleUserId}
+          actions={
+            <>
+              <Link
+                to={adminLicenseDetailPath(user.googleUserId)}
+                className="text-sm font-medium text-primary hover:underline"
+              >
+                Manage license
+              </Link>
+              <StatusBadge disabled={user.disabled} />
+            </>
+          }
+        />
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Card>
@@ -177,33 +186,26 @@ export default function AdminUserDetail() {
             <CardTitle>Audit History</CardTitle>
           </CardHeader>
           <CardContent>
-            {audit.data && audit.data.data.entries.length > 0 ? (
-              <div className="space-y-3">
-                <ul className="divide-y divide-border">
-                  {audit.data.data.entries.map((entry) => (
-                    <li key={entry.id} className="flex items-center justify-between py-2 text-sm">
-                      <span>{AUDIT_EVENT_LABELS[entry.event] ?? entry.event}</span>
-                      <span className="text-muted-foreground">{new Date(entry.ts).toLocaleString()}</span>
-                    </li>
-                  ))}
-                </ul>
-                <Pagination
-                  meta={audit.data.meta.page}
-                  currentPage={auditCursorStack.length}
-                  hasPrevious={auditCursorStack.length > 1}
-                  onNext={() => {
-                    const next = audit.data?.meta.page.nextCursor;
-                    if (next) setAuditCursorStack((s) => [...s, next]);
-                  }}
-                  onPrevious={() => setAuditCursorStack((s) => s.slice(0, -1))}
-                />
-              </div>
-            ) : (
-              <EmptyState
-                title="No audit history"
-                description="Activity for this user (logins, revokes, reconnects, saves) will appear here."
-              />
-            )}
+            <HistoryList
+              entries={audit.data?.data.entries ?? []}
+              rowKey={(entry) => entry.id}
+              renderEntry={(entry) => (
+                <>
+                  <span>{AUDIT_EVENT_LABELS[entry.event] ?? entry.event}</span>
+                  <span className="text-muted-foreground">{new Date(entry.ts).toLocaleString()}</span>
+                </>
+              )}
+              meta={audit.data?.meta.page ?? { total: 0, totalPages: 0, nextCursor: null, limit: 0 }}
+              currentPage={auditCursorStack.length}
+              hasPrevious={auditCursorStack.length > 1}
+              onNext={() => {
+                const next = audit.data?.meta.page.nextCursor;
+                if (next) setAuditCursorStack((s) => [...s, next]);
+              }}
+              onPrevious={() => setAuditCursorStack((s) => s.slice(0, -1))}
+              emptyTitle="No audit history"
+              emptyDescription="Activity for this user (logins, revokes, reconnects, saves) will appear here."
+            />
           </CardContent>
         </Card>
       </div>
@@ -241,14 +243,5 @@ export default function AdminUserDetail() {
         onConfirm={() => void handleConfirm()}
       />
     </PageContainer>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium text-foreground">{value}</span>
-    </div>
   );
 }

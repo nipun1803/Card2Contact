@@ -1,69 +1,77 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Users, UserCheck, UserX, Activity, ScanLine } from "lucide-react";
-import { useAdminUsersList } from "@/features/admin/useAdminUsers";
+import { Gauge, Ban, ScanLine, CreditCard, AlertTriangle } from "lucide-react";
+import { useLicensesList } from "@/features/admin/useAdminLicenses";
 import { StatCard } from "@/shared/components/common/StatCard";
 import { DataTable, type DataTableColumn } from "@/shared/components/common/DataTable";
 import { Pagination } from "@/shared/components/common/Pagination";
-import { StatusBadge } from "@/shared/components/common/StatusBadge";
 import { EmptyState } from "@/shared/components/common/EmptyState";
 import { ErrorState } from "@/shared/components/common/ErrorState";
 import { PageContainer } from "@/shared/components/common/PageContainer";
 import { PageHeader } from "@/shared/components/common/PageHeader";
 import { Input } from "@/shared/components/ui/input";
 import { Select } from "@/shared/components/ui/select";
-import { adminUserDetailPath } from "@/shared/lib/constants";
-import type { AdminUserSummary } from "@/shared/types/api";
-import type { ListUsersQuery } from "@/shared/services/api";
+import { Badge } from "@/shared/components/ui/badge";
+import { adminLicenseDetailPath } from "@/shared/lib/constants";
+import type { EffectiveQuota } from "@/shared/types/api";
+import type { ListLicensesQuery } from "@/shared/services/api";
 
 const SEARCH_DEBOUNCE_MS = 300;
 
-type SortField = NonNullable<ListUsersQuery["sortField"]>;
+type SortField = NonNullable<ListLicensesQuery["sortField"]>;
 
-const COLUMNS: DataTableColumn<AdminUserSummary>[] = [
-  { key: "email", header: "Email", sortField: "email", render: (u) => u.email },
-  { key: "status", header: "Status", render: (u) => <StatusBadge disabled={u.disabled} /> },
+const COLUMNS: DataTableColumn<EffectiveQuota>[] = [
+  { key: "user", header: "User", sortField: "googleUserId", render: (q) => q.email || q.googleUserId },
   {
-    key: "savedContactsCount",
-    header: "Total Scans",
-    sortField: "savedContactsCount",
-    render: (u) => u.savedContactsCount,
+    key: "tier",
+    header: "Active Tier",
+    render: (q) =>
+      q.unlimited ? (
+        <Badge variant="success">Unlimited</Badge>
+      ) : (
+        <Badge variant="default">{q.activeTier?.name ?? "Free"}</Badge>
+      ),
   },
   {
-    key: "createdAt",
-    header: "Registered",
-    sortField: "createdAt",
-    render: (u) => new Date(u.createdAt).toLocaleDateString(),
+    key: "free",
+    header: "Free",
+    sortField: "freeUsed",
+    render: (q) => `${q.freeUsed}/${q.freeLimit}`,
+  },
+  { key: "paidRemaining", header: "Paid remaining", render: (q) => q.paidRemaining },
+  {
+    key: "totalRemaining",
+    header: "Total remaining",
+    sortField: "totalRemaining",
+    render: (q) => (q.unlimited ? "∞" : q.totalRemaining),
   },
   {
-    key: "lastLoginAt",
-    header: "Last Login",
-    sortField: "lastLoginAt",
-    render: (u) => (u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : "Never"),
+    key: "scanBlocked",
+    header: "Scan-blocked",
+    render: (q) => (q.scanBlocked ? <Badge variant="warning">Blocked</Badge> : "—"),
   },
   {
     key: "actions",
     header: "",
-    render: (u) => (
+    render: (q) => (
       <Link
-        to={adminUserDetailPath(u.googleUserId)}
+        to={adminLicenseDetailPath(q.googleUserId)}
         className="text-sm font-medium text-primary hover:underline"
       >
-        View
+        Manage
       </Link>
     ),
   },
 ];
 
-/** User Directory — the default admin view (see AdminDashboard's shell/Outlet). */
-export default function AdminUsers() {
+/** Scan License directory — per-user effective quotas across every user. */
+export default function AdminLicenses() {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState<ListUsersQuery["status"]>("all");
-  const [sortField, setSortField] = useState<SortField>("createdAt");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  // Cursor pagination: a stack of visited cursors so "Previous" can pop back
-  // without a backend "page N" concept (see PgUserStore.list's rationale).
+  const [status, setStatus] = useState<ListLicensesQuery["status"]>("all");
+  const [sortField, setSortField] = useState<SortField>("googleUserId");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  // Cursor pagination: a stack of visited cursors so "Previous" can pop back.
   const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursorStack[cursorStack.length - 1];
 
@@ -73,8 +81,15 @@ export default function AdminUsers() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  const query: ListUsersQuery = { cursor, limit: 20, search: search || undefined, status, sortField, sortDirection };
-  const { data, isLoading, isError, error, refetch } = useAdminUsersList(query);
+  const query: ListLicensesQuery = {
+    cursor,
+    limit: 20,
+    search: search || undefined,
+    status,
+    sortField,
+    sortDirection,
+  };
+  const { data, isLoading, isError, error, refetch } = useLicensesList(query);
 
   function resetPagination() {
     setCursorStack([undefined]);
@@ -92,7 +107,7 @@ export default function AdminUsers() {
 
   const hasActiveFilter = search !== "" || status !== "all";
 
-  function toggleStatusFilter(value: NonNullable<ListUsersQuery["status"]>) {
+  function toggleStatusFilter(value: NonNullable<ListLicensesQuery["status"]>) {
     setStatus((current) => (current === value ? "all" : value));
     resetPagination();
   }
@@ -101,8 +116,8 @@ export default function AdminUsers() {
     <PageContainer width="wide">
       <div className="space-y-6">
         <PageHeader
-          title="User Directory"
-          description="View, search, and manage every card2contact user."
+          title="Scan Licenses"
+          description="Review and adjust every user's scan allowance, tiers, and paid grants."
         />
 
         {isError ? (
@@ -113,43 +128,49 @@ export default function AdminUsers() {
         ) : (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-              <StatCard icon={Users} label="Total Users" value={data?.data.stats.total ?? "—"} />
               <StatCard
-                icon={UserCheck}
-                label="Active Users"
-                value={data?.data.stats.active ?? "—"}
-                onClick={() => toggleStatusFilter("active")}
-                active={status === "active"}
+                icon={Gauge}
+                label="Active Scan Users"
+                value={data?.data.stats.usersWithQuota ?? "—"}
+                hint="have a quota record"
               />
               <StatCard
-                icon={UserX}
-                label="Revoked Users"
-                value={data?.data.stats.disabled ?? "—"}
-                onClick={() => toggleStatusFilter("disabled")}
-                active={status === "disabled"}
-              />
-              <StatCard
-                icon={Activity}
-                label="Recent Logins"
-                value={data?.data.stats.recentLogins ?? "—"}
-                hint="last 24h"
+                icon={Ban}
+                label="Scan-Blocked"
+                value={data?.data.stats.scanBlocked ?? "—"}
+                onClick={() => toggleStatusFilter("scan_blocked")}
+                active={status === "scan_blocked"}
               />
               <StatCard
                 icon={ScanLine}
-                label="Total Scans"
-                value={data?.data.stats.totalScans ?? "—"}
+                label="Free Scans Used"
+                value={data?.data.stats.totalFreeUsed ?? "—"}
                 hint="app-wide"
+              />
+              <StatCard
+                icon={CreditCard}
+                label="Paid Scans Used"
+                value={data?.data.stats.totalPaidUsed ?? "—"}
+                hint="app-wide"
+              />
+              <StatCard
+                icon={AlertTriangle}
+                label="Low Remaining"
+                value={data?.data.stats.lowRemaining ?? "—"}
+                hint="≤3 scans left"
+                onClick={() => toggleStatusFilter("low")}
+                active={status === "low"}
               />
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
               <div className="flex flex-col gap-1.5 sm:max-w-xs sm:flex-1">
-                <label htmlFor="user-search" className="text-sm font-medium text-foreground">
+                <label htmlFor="license-search" className="text-sm font-medium text-foreground">
                   Search
                 </label>
                 <Input
-                  id="user-search"
-                  placeholder="Search by email or Google user id…"
+                  id="license-search"
+                  placeholder="Search by Google user id…"
                   value={searchInput}
                   onChange={(e) => {
                     setSearchInput(e.target.value);
@@ -161,33 +182,35 @@ export default function AdminUsers() {
                 label="Status"
                 value={status}
                 onChange={(e) => {
-                  setStatus(e.target.value as ListUsersQuery["status"]);
+                  setStatus(e.target.value as ListLicensesQuery["status"]);
                   resetPagination();
                 }}
                 className="sm:w-56"
               >
                 <option value="all">All statuses</option>
-                <option value="active">Active</option>
-                <option value="disabled">Revoked</option>
+                <option value="low">Low remaining</option>
+                <option value="over">Over limit</option>
+                <option value="custom">Custom override</option>
+                <option value="scan_blocked">Scan-blocked</option>
               </Select>
             </div>
 
             <DataTable
               columns={COLUMNS}
-              rows={data?.data.users ?? []}
-              rowKey={(u) => u.googleUserId}
+              rows={data?.data.quotas ?? []}
+              rowKey={(q) => q.googleUserId}
               loading={isLoading}
               sortField={sortField}
               sortDirection={sortDirection}
               onSortChange={handleSortChange}
               emptyState={
                 <EmptyState
-                  icon={Users}
-                  title={hasActiveFilter ? "No matching users" : "No users yet"}
+                  icon={Gauge}
+                  title={hasActiveFilter ? "No matching users" : "No quotas yet"}
                   description={
                     hasActiveFilter
                       ? "Try a different search term or clear the filters."
-                      : "Once someone signs in with Google, they'll show up here."
+                      : "Once someone signs in and scans, their quota will show up here."
                   }
                 />
               }

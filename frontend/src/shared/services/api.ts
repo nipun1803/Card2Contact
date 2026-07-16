@@ -9,10 +9,27 @@ import type {
   CardMode,
   ConfirmResponse,
   ExtractResponse,
+  LicenseDetailResponse,
+  LicenseHistoryResponse,
+  LicenseListResponse,
+  LicenseSettingsPatch,
+  LicenseSettingsResponse,
   RecognizeResponse,
   ReviewResponse,
   SaveResponse,
   SubmitCardResponse,
+  TierHistoryResponse,
+  TierInput,
+  TierListResponse,
+  TierResponse,
+  TierRequestStatus,
+  MyPlanResponse,
+  MyRequestsResponse,
+  TierRequestResponse,
+  CreateRequestInput,
+  ApproveOverrideInput,
+  AdminRequestListResponse,
+  AdminApproveResponse,
 } from "@/shared/types/api";
 
 /**
@@ -73,6 +90,31 @@ export class UserDisabledError extends ApiError {
   }
 }
 
+/**
+ * A 402 whose body carries `code: "QUOTA_EXCEEDED"` — the signed-in user has no
+ * scan allowance left. Resolvable by an admin grant/tier; the scan UI shows an
+ * "out of scans, contact your administrator" panel rather than a generic error.
+ */
+export class QuotaExceededError extends ApiError {
+  constructor(message: string) {
+    super(402, message);
+    this.name = "QuotaExceededError";
+  }
+}
+
+/**
+ * A 403 whose body carries `code: "SCAN_BLOCKED"` — an admin blocked this user's
+ * scanning (they stay signed in; only scanning is refused). DISTINCT from
+ * UserDisabledError (also 403, whole-account Revoke Access): the two are told
+ * apart by `code`, never by the shared 403 status.
+ */
+export class ScanBlockedError extends ApiError {
+  constructor(message: string) {
+    super(403, message);
+    this.name = "ScanBlockedError";
+  }
+}
+
 /** A network-level failure (server unreachable, offline). */
 export class NetworkError extends Error {
   constructor(message = "Network request failed") {
@@ -101,6 +143,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     if (res.status === 403 && body.code === "USER_DISABLED") {
       throw new UserDisabledError(body.error ?? "This account has been disabled");
+    }
+    if (res.status === 402 && body.code === "QUOTA_EXCEEDED") {
+      throw new QuotaExceededError(body.error ?? "Scan quota exhausted — contact your administrator");
+    }
+    // SCAN_BLOCKED shares 403 with USER_DISABLED — branch on the code, not status.
+    if (res.status === 403 && body.code === "SCAN_BLOCKED") {
+      throw new ScanBlockedError(
+        body.error ?? "Scanning is blocked for your account — contact your administrator",
+      );
     }
     throw new ApiError(res.status, body.error ?? res.statusText);
   }
@@ -289,4 +340,208 @@ export function forceLogoutAdminUser(googleUserId: string): Promise<AdminForceLo
     `/api/admin/users/${encodeURIComponent(googleUserId)}/force-logout`,
     { method: "POST" },
   );
+}
+
+/* ---- License Management (Phase 4/5) --------------------------------------
+ *
+ * Scan quotas, per-user tier assignment, and the tier catalog. All ride the
+ * admin_session cookie via `request`. Cursor-based like the user directory.
+ */
+
+export interface ListLicensesQuery {
+  cursor?: string;
+  limit?: number;
+  search?: string;
+  status?: "all" | "low" | "over" | "custom" | "scan_blocked";
+  sortField?: "freeUsed" | "totalRemaining" | "googleUserId";
+  sortDirection?: "asc" | "desc";
+}
+
+function adminLicense(path: string): string {
+  return `/api/admin/licenses${path}`;
+}
+
+function userPath(googleUserId: string, suffix = ""): string {
+  return adminLicense(`/quotas/${encodeURIComponent(googleUserId)}${suffix}`);
+}
+
+const jsonPost = (body?: unknown): RequestInit => ({
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+});
+
+// ── Settings ────────────────────────────────────────────────────────────────
+export function getLicenseSettings(): Promise<LicenseSettingsResponse> {
+  return request<LicenseSettingsResponse>(adminLicense("/settings"));
+}
+
+export function updateLicenseSettings(patch: LicenseSettingsPatch): Promise<LicenseSettingsResponse> {
+  return request<LicenseSettingsResponse>(adminLicense("/settings"), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+// ── Quota directory + detail ─────────────────────────────────────────────────
+export function listLicenses(query: ListLicensesQuery = {}): Promise<LicenseListResponse> {
+  return request<LicenseListResponse>(adminLicense(`/quotas${toQueryString({ ...query })}`));
+}
+
+export function getLicense(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId));
+}
+
+export function getLicenseHistory(
+  googleUserId: string,
+  cursor?: string,
+  limit = 20,
+): Promise<LicenseHistoryResponse> {
+  return request<LicenseHistoryResponse>(userPath(googleUserId, `/history${toQueryString({ cursor, limit })}`));
+}
+
+export function getTierHistory(
+  googleUserId: string,
+  cursor?: string,
+  limit = 20,
+): Promise<TierHistoryResponse> {
+  return request<TierHistoryResponse>(userPath(googleUserId, `/tier-history${toQueryString({ cursor, limit })}`));
+}
+
+// ── Per-user quota actions (all return the updated EffectiveQuota) ────────────
+export function setFreeLimit(googleUserId: string, limit: number): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/free"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+}
+
+export function removeFreeOverride(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/free"), { method: "DELETE" });
+}
+
+export function grantPaid(
+  googleUserId: string,
+  amount: number,
+  expiresAt: string | null,
+  reason?: string,
+): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(
+    userPath(googleUserId, "/paid/grants"),
+    jsonPost({ amount, expiresAt, reason }),
+  );
+}
+
+export function revokeGrant(googleUserId: string, grantId: number): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, `/paid/grants/${grantId}`), {
+    method: "DELETE",
+  });
+}
+
+export function resetUsed(
+  googleUserId: string,
+  pool: "free" | "paid" | "both",
+): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/reset"), jsonPost({ pool }));
+}
+
+export function recalculateQuota(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/recalculate"), { method: "POST" });
+}
+
+export function scanBlockUser(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/scan-block"), { method: "POST" });
+}
+
+export function scanUnblockUser(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/scan-unblock"), { method: "POST" });
+}
+
+// ── Tier assignment ──────────────────────────────────────────────────────────
+export function assignTier(googleUserId: string, tierId: number): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/tier"), jsonPost({ tierId }));
+}
+
+export function removeTier(googleUserId: string): Promise<LicenseDetailResponse> {
+  return request<LicenseDetailResponse>(userPath(googleUserId, "/tier"), { method: "DELETE" });
+}
+
+// ── Tier catalog ─────────────────────────────────────────────────────────────
+export function listTiers(search?: string): Promise<TierListResponse> {
+  return request<TierListResponse>(adminLicense(`/tiers${toQueryString({ search })}`));
+}
+
+export function createTier(input: TierInput): Promise<TierResponse> {
+  return request<TierResponse>(adminLicense("/tiers"), jsonPost(input));
+}
+
+export function updateTier(id: number, patch: Partial<TierInput>): Promise<TierResponse> {
+  return request<TierResponse>(adminLicense(`/tiers/${id}`), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function archiveTier(id: number): Promise<void> {
+  return request<void>(adminLicense(`/tiers/${id}`), { method: "DELETE" });
+}
+
+export function cloneTier(id: number, name: string): Promise<TierResponse> {
+  return request<TierResponse>(adminLicense(`/tiers/${id}/clone`), jsonPost({ name }));
+}
+
+export function bulkAssignTier(
+  tierId: number,
+  googleUserIds: string[],
+): Promise<{ data: { assigned: number } }> {
+  return request<{ data: { assigned: number } }>(
+    adminLicense(`/tiers/${tierId}/bulk-assign`),
+    jsonPost({ googleUserIds }),
+  );
+}
+
+/* ---- User-facing plan + upgrade requests (/api/me) ----------------------- */
+
+export function getMyPlan(): Promise<MyPlanResponse> {
+  return request<MyPlanResponse>("/api/me/plan");
+}
+
+export function getMyRequests(): Promise<MyRequestsResponse> {
+  return request<MyRequestsResponse>("/api/me/requests");
+}
+
+/** File an upgrade request. A 409 REQUEST_ALREADY_PENDING means one is open. */
+export function createUpgradeRequest(input: CreateRequestInput): Promise<TierRequestResponse> {
+  return request<TierRequestResponse>("/api/me/requests", jsonPost(input));
+}
+
+/* ---- Admin: upgrade request queue --------------------------------------- */
+
+export function listUpgradeRequests(
+  query: { status?: TierRequestStatus; cursor?: string; limit?: number } = {},
+): Promise<AdminRequestListResponse> {
+  return request<AdminRequestListResponse>(adminLicense(`/requests${toQueryString({ ...query })}`));
+}
+
+export function getUpgradeRequestCount(): Promise<{ data: { pendingCount: number } }> {
+  return request<{ data: { pendingCount: number } }>(adminLicense("/requests/count"));
+}
+
+export function getUserUpgradeRequests(googleUserId: string): Promise<MyRequestsResponse> {
+  return request<MyRequestsResponse>(userPath(googleUserId, "/requests"));
+}
+
+/** Approve a request. Omit override fields to approve exactly as asked. */
+export function approveUpgradeRequest(
+  id: number,
+  override: ApproveOverrideInput = {},
+): Promise<AdminApproveResponse> {
+  return request<AdminApproveResponse>(adminLicense(`/requests/${id}/approve`), jsonPost(override));
+}
+
+export function rejectUpgradeRequest(id: number, note?: string): Promise<TierRequestResponse> {
+  return request<TierRequestResponse>(adminLicense(`/requests/${id}/reject`), jsonPost({ note }));
 }
