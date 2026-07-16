@@ -15,12 +15,23 @@ import {
   createUploadLimiter,
 } from "./shared/http/rate-limit";
 import { createAdminAuth } from "./shared/http/admin-auth";
+import { createQuotaGuard } from "./shared/http/quota-guard";
 import {
   AdminSessionStore,
   InMemoryAdminSessionStore,
 } from "./shared/store/admin-session-store";
 import { UserRecord, UserStore, spreadsheetUrlFor } from "./shared/store/user-store";
 import { SessionStore } from "./shared/store/session-store";
+import { QuotaStore, MemoryQuotaStore } from "./shared/store/quota-store";
+import {
+  LicenseSettingsStore,
+  MemoryLicenseSettingsStore,
+} from "./shared/store/license-settings-store";
+import { TierStore, MemoryTierStore } from "./shared/store/tier-store";
+import {
+  TierRequestStore,
+  MemoryTierRequestStore,
+} from "./shared/store/tier-request-store";
 import { AuditLogger, StdoutAuditLogger } from "./shared/audit/audit-logger";
 import { Metrics, StdoutMetrics } from "./shared/observability/metrics";
 import { SheetsProvisioner } from "./shared/sheets/sheets-provisioner";
@@ -38,6 +49,10 @@ import { AdminAuthService } from "./modules/admin-auth/admin-auth.service";
 import { createAdminAuthRouter } from "./modules/admin-auth/admin-auth.router";
 import { AdminUserService } from "./modules/admin-users/admin-users.service";
 import { createAdminUsersRouter } from "./modules/admin-users/admin-users.router";
+import { AdminLicenseService } from "./modules/admin-licenses/admin-licenses.service";
+import { createAdminLicensesRouter } from "./modules/admin-licenses/admin-licenses.router";
+import { LicensingService } from "./modules/licensing/licensing.service";
+import { createLicensingRouter } from "./modules/licensing/licensing.router";
 
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
@@ -103,6 +118,16 @@ function createSheetsProvisioner(userStore: UserStore): SheetsProvisioner {
 export function createApp(deps: {
   userStore: UserStore;
   sessionStore: SessionStore;
+  /**
+   * License Management (Phase 2/3). Durable in production (Pg, built in
+   * index.ts), but defaulted to in-memory doubles so unit/integration tests that
+   * don't exercise quotas — i.e. every pre-existing test — keep calling
+   * createApp with no change and stay DB-free.
+   */
+  quotaStore?: QuotaStore;
+  licenseSettingsStore?: LicenseSettingsStore;
+  tierStore?: TierStore;
+  tierRequestStore?: TierRequestStore;
   audit?: AuditLogger;
   metrics?: Metrics;
   /**
@@ -115,6 +140,10 @@ export function createApp(deps: {
   const {
     userStore,
     sessionStore,
+    quotaStore = new MemoryQuotaStore(),
+    licenseSettingsStore = new MemoryLicenseSettingsStore(),
+    tierStore = new MemoryTierStore(),
+    tierRequestStore = new MemoryTierRequestStore(),
     audit = new StdoutAuditLogger(),
     metrics = new StdoutMetrics(),
     adminSessionStore = new InMemoryAdminSessionStore(),
@@ -180,7 +209,20 @@ export function createApp(deps: {
 
   const requireAuth = createRequireAuth(audit, metrics);
 
-  app.use("/api", createM1Router(cardSessionStore, createUploadLimiter(limiterDeps)));
+  /**
+   * Scan quota enforcement (License Management). Composed onto the pipeline the
+   * same way M5's guards are — the modules import nothing quota-related:
+   * - M1 (upload) requires a signed-in user: the whole scan flow is metered per
+   *   user, so an anonymous scan can't be attributed and is rejected up front.
+   * - M2 (OCR) additionally passes the quota guard, which meters one scan at the
+   *   expensive Mistral call and hard-blocks (402) an exhausted user or 403s a
+   *   Scan-Blocked one. requireAuth MUST run before the guard so req.auth is set.
+   *   Mounted as a path-scoped middleware BEFORE the M2 router so it runs first.
+   */
+  const quotaGuard = createQuotaGuard(quotaStore, licenseSettingsStore, audit, metrics);
+
+  app.use("/api", createM1Router(cardSessionStore, createUploadLimiter(limiterDeps), requireAuth));
+  app.use("/api/cards/:cardId/recognize", requireAuth, quotaGuard);
   app.use("/api", createM2Router(cardSessionStore));
   app.use("/api", createM3Router(cardSessionStore));
   app.use("/api", createM4Router(cardSessionStore));
@@ -249,6 +291,50 @@ export function createApp(deps: {
     createAdminUsersRouter({ service: adminUserService, adminAuth })
   );
 
+  /**
+   * License Management (Phase 2). Sits behind the same shared `adminAuth`. The
+   * service reaches the users store only to verify a named user exists before
+   * touching their quota — it never mutates user identity.
+   */
+  const adminLicenseService = new AdminLicenseService(
+    quotaStore,
+    licenseSettingsStore,
+    userStore,
+    tierStore,
+    tierRequestStore,
+    audit,
+    metrics
+  );
+  app.use(
+    "/api/admin",
+    createAdminLicensesRouter({ service: adminLicenseService, adminAuth })
+  );
+
+  /**
+   * User-facing License Management: "Your Plan" + upgrade requests. Behind
+   * requireAuth (a Google Active Session), NOT adminAuth — it reuses the same
+   * stores as the admin service so the two are one source of truth, but shares
+   * no route or auth path with it. A user can read their own plan and file a
+   * request; only the admin service can grant.
+   */
+  const licensingService = new LicensingService(
+    quotaStore,
+    licenseSettingsStore,
+    tierStore,
+    tierRequestStore,
+    audit,
+    metrics
+  );
+  app.use("/api", createLicensingRouter({ service: licensingService, requireAuth }));
+
+  /**
+   * Sentry's error handler must be registered after every route/router and
+   * before our own `errorHandler` — it captures the exception then calls
+   * next(err), which errorHandler still receives and formats exactly as
+   * before. It stays a no-op if instrument.ts never called Sentry.init
+   * (SENTRY_DSN unset).
+   */
+  Sentry.setupExpressErrorHandler(app);
   app.use(errorHandler);
 
   return app;

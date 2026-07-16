@@ -94,6 +94,40 @@ describe("initSchema", () => {
     await initSchema(pool);
     expect(joined(sql)).toContain("SET access_token = NULL");
   });
+
+  it("creates the License Management tables idempotently and seeds settings", async () => {
+    const { pool, sql } = recordingPool();
+    await initSchema(pool);
+    const all = joined(sql);
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS license_settings");
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS scan_quotas");
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS paid_grants");
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS quota_consumptions");
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS quota_ledger");
+    // The settings seed must be idempotent — it re-runs on every boot.
+    expect(all).toContain("INSERT INTO license_settings (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING");
+  });
+
+  it("cascades quota rows and grants when a user is deleted", async () => {
+    const { pool, sql } = recordingPool();
+    await initSchema(pool);
+    const scanQuotas = sql.find((s) => s.includes("CREATE TABLE IF NOT EXISTS scan_quotas"))!;
+    const paidGrants = sql.find((s) => s.includes("CREATE TABLE IF NOT EXISTS paid_grants"))!;
+    expect(scanQuotas).toContain("REFERENCES users(google_user_id) ON DELETE CASCADE");
+    expect(paidGrants).toContain("REFERENCES users(google_user_id) ON DELETE CASCADE");
+    // The ledger, like audit_log, deliberately has NO FK — it must outlive rows.
+    const ledger = sql.find((s) => s.includes("CREATE TABLE IF NOT EXISTS quota_ledger"))!;
+    expect(ledger).not.toContain("REFERENCES users");
+  });
+
+  it("runs the License schema BEFORE the Token Cutover wipe", async () => {
+    const { pool, sql } = recordingPool();
+    await initSchema(pool);
+    const licenseIdx = sql.findIndex((s) => s.includes("CREATE TABLE IF NOT EXISTS license_settings"));
+    const wipeIdx = sql.findIndex((s) => s.includes("SET access_token = NULL"));
+    expect(licenseIdx).toBeGreaterThanOrEqual(0);
+    expect(licenseIdx).toBeLessThan(wipeIdx);
+  });
 });
 
 /**

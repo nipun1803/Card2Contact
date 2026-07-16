@@ -8,6 +8,10 @@ import { PgSessionStore } from "./shared/store/session-store";
 import { AesGcmTokenCodec, decodeEncryptionKey } from "./shared/store/token-codec";
 import { PgAuditLogger } from "./shared/audit/pg-audit-logger";
 import { StdoutMetrics } from "./shared/observability/metrics";
+import { PgQuotaStore } from "./shared/store/quota-store";
+import { PgLicenseSettingsStore } from "./shared/store/license-settings-store";
+import { PgTierStore } from "./shared/store/tier-store";
+import { PgTierRequestStore } from "./shared/store/tier-request-store";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
 
@@ -47,11 +51,24 @@ async function main(): Promise<void> {
 
   const userStore = new PgUserStore(pool, codec);
   const sessionStore = new PgSessionStore(pool);
+  const quotaStore = new PgQuotaStore(pool);
+  const licenseSettingsStore = new PgLicenseSettingsStore(pool);
+  const tierStore = new PgTierStore(pool);
+  const tierRequestStore = new PgTierRequestStore(pool);
   const audit = new PgAuditLogger(pool);
   const metrics = new StdoutMetrics();
   metrics.start();
 
-  const app = createApp({ userStore, sessionStore, audit, metrics });
+  const app = createApp({
+    userStore,
+    sessionStore,
+    quotaStore,
+    licenseSettingsStore,
+    tierStore,
+    tierRequestStore,
+    audit,
+    metrics,
+  });
   app.listen(PORT, () => {
     console.log(`Card2Contact backend listening on http://localhost:${PORT}`);
   });

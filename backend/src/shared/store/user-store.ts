@@ -119,6 +119,13 @@ export interface UserStore {
   /** Global (unfiltered) counts for the admin dashboard summary cards. */
   stats(): Promise<UserStats>;
   /**
+   * Batch-resolve emails for a set of googleUserIds in one query — used by the
+   * License Management surface to label quota/request rows (keyed by id) with a
+   * human email, without an N+1 of findById per row. Missing ids are simply
+   * absent from the map (the caller falls back to showing the id).
+   */
+  emailsByIds(googleUserIds: string[]): Promise<Map<string, string>>;
+  /**
    * Revoke Access. Sets disabled_at = now(), disabled_by = adminUsername;
    * idempotent — re-disabling an already-disabled user changes neither the
    * timestamp nor the actor (first disable wins). Returns null if the user
@@ -222,6 +229,17 @@ export class PgUserStore implements UserStore {
       [googleUserId]
     );
     return rows.length ? this.toRecord(rows[0]) : null;
+  }
+
+  async emailsByIds(googleUserIds: string[]): Promise<Map<string, string>> {
+    if (googleUserIds.length === 0) return new Map();
+    // De-dup the ids (a list may repeat a user) and resolve in one ANY($1) query.
+    const unique = [...new Set(googleUserIds)];
+    const { rows } = await this.pool.query<{ google_user_id: string; email: string }>(
+      `SELECT google_user_id, email FROM users WHERE google_user_id = ANY($1)`,
+      [unique]
+    );
+    return new Map(rows.map((r) => [r.google_user_id, r.email]));
   }
 
   async upsertOnLogin(

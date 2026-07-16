@@ -182,7 +182,12 @@ describe("a revoked session is rejected everywhere it is presented", () => {
  * for every logged-out user.
  */
 describe("anonymous requests still work", () => {
-  it("allows a cookieless M1 upload", async () => {
+  // The scan pipeline is now metered per user (License Management), so M1 upload
+  // requires a signed-in user. A cookieless upload is 401 NotAuthenticated —
+  // NOT SESSION_REVOKED (that is only for a cookie naming a known-revoked
+  // session). This documents the M1 auth change without weakening the
+  // middleware's "unknown/absent cookie ⇒ anonymous, never revoked" rule.
+  it("401s a cookieless M1 upload as NotAuthenticated (not SESSION_REVOKED)", async () => {
     const { app } = await setup();
 
     const res = await request(app)
@@ -190,8 +195,8 @@ describe("anonymous requests still work", () => {
       .field("mode", "single")
       .attach("frontImage", PNG, "card.png");
 
-    expect(res.status).toBe(201);
-    expect(res.body.cardId).toBeDefined();
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBeUndefined();
   });
 
   it("answers /status with authenticated:false and no error", async () => {

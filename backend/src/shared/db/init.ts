@@ -188,7 +188,352 @@ export async function initSchema(pool: Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC);
   `);
 
+  await initLicenseSchema(pool);
+
   await wipePlaintextTokens(pool);
+}
+
+/**
+ * License Management / Scan Quota (Phase 1): meters scans (one OCR run = one
+ * unit), enforces per-user quotas, and records every quota change. Split into
+ * its own function purely for readability — it is still part of the one
+ * idempotent initSchema run, added here as additive CREATE TABLE IF NOT EXISTS.
+ *
+ * Five tables, each with a distinct job:
+ * - license_settings   — app-wide defaults + global on/off flags (singleton row)
+ * - scan_quotas        — per-user free counter + Scan-Block state
+ * - paid_grants        — per-user paid pool as dated, independently-expiring grants
+ * - quota_consumptions — one row per billable card (exactly-once metering key)
+ * - quota_ledger       — append-only "why did this quota change" history
+ *
+ * See docs/modules/admin/LICENSE_MANAGEMENT.md for the full data model.
+ */
+export async function initLicenseSchema(pool: Pool): Promise<void> {
+  /**
+   * Application-wide license configuration. A single row (id is a BOOLEAN pinned
+   * to TRUE by the CHECK, so a second INSERT can never create a second config)
+   * rather than a stringly-typed key/value table: these are a small, fixed set
+   * of typed values that change together, and one typed row is both safer and
+   * cheaper to read than parsing strings.
+   *
+   * Defaults chosen so a fresh deploy meters but does not lock anyone out:
+   * 10 free scans, no paid, all pools enabled, enforcement ON (the user chose
+   * hard-block). The seed INSERT is idempotent via ON CONFLICT DO NOTHING.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS license_settings (
+      id                  BOOLEAN PRIMARY KEY DEFAULT TRUE,
+      default_free_limit  INTEGER NOT NULL DEFAULT 10,
+      default_paid_limit  INTEGER NOT NULL DEFAULT 0,
+      free_enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+      paid_enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+      enforcement_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by          TEXT,
+      CONSTRAINT license_settings_singleton CHECK (id = TRUE)
+    );
+  `);
+  await pool.query(`
+    INSERT INTO license_settings (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
+  `);
+
+  /**
+   * Per-user free pool + Scan-Block state. Lazily materialized: a user with no
+   * scan history has no row, and admin reads COALESCE a missing row to "0 used,
+   * full default remaining". free_limit_override is NULL to inherit the global
+   * default — so "remove override → reset to default" is a single SET ... = NULL
+   * with no backfill.
+   *
+   * Scan-Block is deliberately HERE and not the users table: users.disabled_at
+   * is login-level Revoke Access (a different door). scan_blocked_at blocks only
+   * scanning while the user stays signed in. blocked_by/unblocked_by mirror the
+   * users-table disabled_by convention (admin username, plain text, not a FK).
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS scan_quotas (
+      google_user_id      TEXT PRIMARY KEY REFERENCES users(google_user_id) ON DELETE CASCADE,
+      free_limit_override INTEGER,
+      free_used           INTEGER NOT NULL DEFAULT 0,
+      scan_blocked_at     TIMESTAMPTZ,
+      scan_blocked_by     TEXT,
+      scan_unblocked_at   TIMESTAMPTZ,
+      scan_unblocked_by   TEXT,
+      created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS scan_quotas_blocked_idx
+      ON scan_quotas (scan_blocked_at) WHERE scan_blocked_at IS NOT NULL;
+  `);
+
+  /**
+   * Paid pool as a set of dated grants — one row per admin paid grant, each with
+   * its own expires_at. Drawable paid = SUM(amount - used) over non-expired,
+   * unrevoked grants. A flat "paid_used" integer cannot express independent
+   * expiries, so the pool is modelled as rows: "increase" is a new grant,
+   * "decrease/reset" soft-revokes grants (revoked_at), and Active/Expired status
+   * is computed from expires_at at read time — no cron needed.
+   *
+   * CHECK (used <= amount) is a last-line guard; the consume statement never
+   * over-draws a grant because it only touches rows WHERE used < amount.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS paid_grants (
+      id             BIGSERIAL PRIMARY KEY,
+      google_user_id TEXT NOT NULL REFERENCES users(google_user_id) ON DELETE CASCADE,
+      amount         INTEGER NOT NULL CHECK (amount > 0),
+      used           INTEGER NOT NULL DEFAULT 0 CHECK (used >= 0 AND used <= amount),
+      expires_at     TIMESTAMPTZ,
+      granted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+      granted_by     TEXT NOT NULL,
+      revoked_at     TIMESTAMPTZ,
+      reason         TEXT
+    );
+  `);
+  // Partial index tuned to the consume query: the drawable set (unrevoked,
+  // not-full), ordered by expires_at (soonest-to-expire drawn first).
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS paid_grants_draw_idx
+      ON paid_grants (google_user_id, expires_at)
+      WHERE revoked_at IS NULL AND used < amount;
+  `);
+
+  /**
+   * Exactly-once metering. One row per billable card, keyed (google_user_id,
+   * card_id). The consume path inserts here FIRST with ON CONFLICT DO NOTHING;
+   * a retried OCR request (network flake re-sending the same cardId) conflicts,
+   * returns zero rows, and short-circuits to the prior decision — so a scan is
+   * billed exactly once no matter how many times the client retries.
+   *
+   * `pool` records which pool the scan drew from (and grant_id which grant), so
+   * a retry can return the SAME decision, and recalculate can reconcile counters
+   * from this table if they ever drift.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quota_consumptions (
+      google_user_id TEXT NOT NULL REFERENCES users(google_user_id) ON DELETE CASCADE,
+      card_id        TEXT NOT NULL,
+      pool           TEXT NOT NULL,
+      grant_id       BIGINT,
+      consumed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (google_user_id, card_id)
+    );
+  `);
+
+  /**
+   * Append-only history of every quota change: automatic consumes plus admin
+   * grants/adjusts/resets/overrides and Scan-Block toggles. No FK to users —
+   * like audit_log, a ledger row must outlive the row it describes. This powers
+   * the admin "quota history" view; counters/grants remain the atomic source of
+   * truth, the ledger is a best-effort (fire-and-forget) record of intent.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS quota_ledger (
+      id             BIGSERIAL PRIMARY KEY,
+      ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+      google_user_id TEXT NOT NULL,
+      kind           TEXT NOT NULL,
+      pool           TEXT,
+      grant_id       BIGINT,
+      delta          INTEGER,
+      reason         TEXT,
+      admin_username TEXT
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS quota_ledger_user_ts_idx ON quota_ledger (google_user_id, ts DESC);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS quota_ledger_ts_idx ON quota_ledger (ts DESC);
+  `);
+
+  await initTierSchema(pool);
+}
+
+/**
+ * Tier layer (Phase 4): named, admin-configurable allowance presets on top of
+ * the free-counter + paid-grants primitives. A Tier is DATA the admin edits, not
+ * a name the code branches on — enforcement reads only is_unlimited / scan_limit
+ * / validity_days, so a future custom tier needs no code change.
+ *
+ * Two tables plus two additive columns:
+ * - tiers            — the catalog (Free / Professional / Enterprise, editable)
+ * - tier_assignments — append-only snapshot history + current-tier source
+ * - paid_grants.tier_id       — stamps a grant with the tier that created it
+ * - scan_quotas.unlimited_until — the per-user "never block" window (unlimited)
+ *
+ * See docs/modules/admin/LICENSE_MANAGEMENT.md.
+ */
+export async function initTierSchema(pool: Pool): Promise<void> {
+  /**
+   * The tier catalog. `is_unlimited` (not the name) is what enforcement keys off
+   * — a limited tier MUST carry a scan_limit (CHECK), an unlimited one ignores
+   * it. `validity_days` NULL = no expiry (the Free tier). Exactly one row is
+   * `is_default` (the fallback when a paid tier lapses); a partial unique index
+   * enforces that. Tiers are soft-deleted (archived_at) because assignments and
+   * grants reference them and must never dangle.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tiers (
+      id            BIGSERIAL PRIMARY KEY,
+      name          TEXT NOT NULL UNIQUE,
+      is_unlimited  BOOLEAN NOT NULL DEFAULT FALSE,
+      scan_limit    INTEGER,
+      validity_days INTEGER,
+      is_default    BOOLEAN NOT NULL DEFAULT FALSE,
+      sort_order    INTEGER NOT NULL DEFAULT 0,
+      archived_at   TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_by    TEXT,
+      CONSTRAINT tiers_limit_or_unlimited CHECK (is_unlimited OR scan_limit IS NOT NULL),
+      CONSTRAINT tiers_limit_positive CHECK (scan_limit IS NULL OR scan_limit > 0),
+      CONSTRAINT tiers_validity_positive CHECK (validity_days IS NULL OR validity_days > 0)
+    );
+  `);
+  // At most one default tier — enforced in the DB so no code path can create two.
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS tiers_single_default_idx
+      ON tiers ((is_default)) WHERE is_default;
+  `);
+
+  /**
+   * Seed the three starting tiers. Snapshot-on-assign means editing these later
+   * never disturbs already-assigned users, so seeding sane defaults is safe.
+   * ON CONFLICT (name) DO NOTHING keeps it idempotent across boots and lets an
+   * admin rename/edit without the seed clobbering their changes.
+   */
+  await pool.query(`
+    INSERT INTO tiers (name, is_unlimited, scan_limit, validity_days, is_default, sort_order)
+    VALUES ('Free', FALSE, 30, NULL, TRUE, 0)
+    ON CONFLICT (name) DO NOTHING;
+  `);
+  await pool.query(`
+    INSERT INTO tiers (name, is_unlimited, scan_limit, validity_days, is_default, sort_order)
+    VALUES ('Professional', FALSE, 1000, 365, FALSE, 1)
+    ON CONFLICT (name) DO NOTHING;
+  `);
+  await pool.query(`
+    INSERT INTO tiers (name, is_unlimited, scan_limit, validity_days, is_default, sort_order)
+    VALUES ('Enterprise', TRUE, NULL, 365, FALSE, 2)
+    ON CONFLICT (name) DO NOTHING;
+  `);
+
+  /**
+   * Append-only assignment history AND the current-tier source of truth. Each
+   * row SNAPSHOTS the tier's values as of assign time (tier_name, is_unlimited,
+   * scan_limit, validity_days, expires_at) — so a later catalog edit can't
+   * retroactively change what a user was given, and "when did they move from X
+   * to Y" is answerable without reconstructing state. The user's CURRENT tier is
+   * the latest row whose action <> 'removed'.
+   *
+   * No FK on tier_id is enforced as RESTRICT — a tier is archived, never deleted,
+   * so the reference stays valid; the snapshot columns make the row
+   * self-describing even if the catalog row later changes.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tier_assignments (
+      id                 BIGSERIAL PRIMARY KEY,
+      google_user_id     TEXT NOT NULL REFERENCES users(google_user_id) ON DELETE CASCADE,
+      tier_id            BIGINT REFERENCES tiers(id),
+      tier_name          TEXT,
+      is_unlimited       BOOLEAN,
+      scan_limit         INTEGER,
+      validity_days      INTEGER,
+      expires_at         TIMESTAMPTZ,
+      previous_tier_id   BIGINT,
+      previous_tier_name TEXT,
+      action             TEXT NOT NULL,   -- assigned | changed | removed
+      assigned_by        TEXT,
+      assigned_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS tier_assignments_user_idx
+      ON tier_assignments (google_user_id, assigned_at DESC);
+  `);
+
+  // Additive columns on the Phase-1 tables (idempotent).
+  await pool.query(`
+    ALTER TABLE paid_grants ADD COLUMN IF NOT EXISTS tier_id BIGINT REFERENCES tiers(id);
+  `);
+  await pool.query(`
+    ALTER TABLE scan_quotas ADD COLUMN IF NOT EXISTS unlimited_until TIMESTAMPTZ;
+  `);
+
+  await initTierRequestSchema(pool);
+}
+
+/**
+ * Tier Upgrade Requests: a user-initiated workflow layer on top of the tier
+ * catalog. A request is METADATA, not an allowance — nothing about a user's
+ * quota changes when they file one. Only an admin decision acts: Approve calls
+ * the existing assignTier / grantPaid seam (the same one a future payment
+ * webhook would call), so there is one source of truth and no parallel grant
+ * mechanism. The enforcement path (quota-guard, consume) never reads this table.
+ *
+ * Two request shapes, discriminated by `kind`:
+ * - 'tier'   — the user picked a catalog tier (requested_tier_id set).
+ * - 'custom' — the user asked for an ad-hoc amount/duration with a reason.
+ *
+ * Lifecycle: pending -> approved | rejected. Exactly one pending row per user is
+ * enforced by a partial unique index — the DB guarantees "one open request",
+ * so a double-submit races to a single row instead of stacking duplicates. The
+ * admin's decision may DIFFER from the ask (approve-with-different-tier /
+ * approve-with-custom-quota), so the decision columns are separate from the
+ * request columns and record what was actually granted.
+ *
+ * See docs/modules/admin/LICENSE_MANAGEMENT.md.
+ */
+export async function initTierRequestSchema(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tier_requests (
+      id                  BIGSERIAL PRIMARY KEY,
+      google_user_id      TEXT NOT NULL REFERENCES users(google_user_id) ON DELETE CASCADE,
+      kind                TEXT NOT NULL,             -- 'tier' | 'custom'
+      -- What the user asked for (a snapshot of intent; the tier may be edited later).
+      requested_tier_id   BIGINT REFERENCES tiers(id),
+      requested_tier_name TEXT,                      -- snapshot at request time
+      requested_amount    INTEGER,                   -- custom: desired scan count
+      requested_days      INTEGER,                   -- custom: desired validity window
+      user_note           TEXT,                      -- optional (tier) / required (custom) justification
+      -- The user's tier at request time, for admin context (snapshot, not a live ref).
+      current_tier_name   TEXT,
+      status              TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+      -- What the admin actually did (may differ from the ask). NULL until decided.
+      decided_by          TEXT,
+      decided_at          TIMESTAMPTZ,
+      decision_note       TEXT,                      -- admin's reason (esp. on reject)
+      granted_tier_id     BIGINT REFERENCES tiers(id),   -- the tier assigned on approve, if any
+      granted_amount      INTEGER,                   -- the paid grant amount on approve, if any
+      granted_days        INTEGER,
+      created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT tier_requests_kind CHECK (kind IN ('tier', 'custom')),
+      CONSTRAINT tier_requests_status CHECK (status IN ('pending', 'approved', 'rejected')),
+      -- A 'tier' request must name a tier; a 'custom' one must carry a reason.
+      CONSTRAINT tier_requests_shape CHECK (
+        (kind = 'tier'   AND requested_tier_id IS NOT NULL) OR
+        (kind = 'custom' AND user_note IS NOT NULL)
+      )
+    );
+  `);
+  // At most one PENDING request per user — the DB enforces the "one open
+  // request" rule so a double-submit can't stack duplicates.
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS tier_requests_one_pending_idx
+      ON tier_requests (google_user_id) WHERE status = 'pending';
+  `);
+  // Admin queue: pending-first, newest-first.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS tier_requests_queue_idx
+      ON tier_requests (status, created_at DESC);
+  `);
+  // A user's own request history.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS tier_requests_user_idx
+      ON tier_requests (google_user_id, created_at DESC);
+  `);
 }
 
 /**

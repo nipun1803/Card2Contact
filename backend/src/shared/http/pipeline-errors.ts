@@ -90,3 +90,39 @@ export class UserDisabledError extends Error {
     this.name = "UserDisabledError";
   }
 }
+
+/**
+ * Thrown by the quota guard when a signed-in user has no drawable scan quota
+ * left (free exhausted and no active paid grant), while enforcement is ON. 402
+ * Payment Required with `code: "QUOTA_EXCEEDED"` — the frontend prompts the user
+ * to contact the administrator for more scans, rather than treating it as a bug.
+ *
+ * Distinct from the two 403s below/above: this is "out of allowance", a state
+ * the user can resolve by being granted more; it is not an administrative denial
+ * of access.
+ */
+export class QuotaExceededError extends Error {
+  readonly code = "QUOTA_EXCEEDED";
+  constructor(message = "Scan quota exhausted — contact your administrator") {
+    super(message);
+    this.name = "QuotaExceededError";
+  }
+}
+
+/**
+ * Thrown by the quota guard when an admin has Scan-Blocked the user. The user
+ * stays signed in and may use the rest of the app, but scanning is refused. 403
+ * with `code: "SCAN_BLOCKED"`.
+ *
+ * Deliberately its OWN 403 and code, NOT reusing UserDisabledError: Scan-Block
+ * is a scanning-only block that leaves login intact, whereas UserDisabledError
+ * (Revoke Access) revokes the whole account. The frontend and error handler must
+ * discriminate on `code`, never on the shared 403 status. See CLAUDE.md.
+ */
+export class ScanBlockedError extends Error {
+  readonly code = "SCAN_BLOCKED";
+  constructor(message = "Scanning is blocked for your account — contact your administrator") {
+    super(message);
+    this.name = "ScanBlockedError";
+  }
+}

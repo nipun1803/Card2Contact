@@ -3,7 +3,9 @@ import { CardNotFoundError } from "../store/card-session-store";
 import {
   NotAuthenticatedError,
   PipelineOrderError,
+  QuotaExceededError,
   ReauthRequiredError,
+  ScanBlockedError,
   SessionRevokedError,
   UserDisabledError,
   ValidationError,
@@ -14,6 +16,13 @@ import {
   AdminNotConfiguredError,
 } from "./admin-errors";
 import { UserNotFoundError } from "../../modules/admin-users/admin-users.service";
+import {
+  LicenseUserNotFoundError,
+  LicenseValidationError,
+  TierNotFoundError,
+} from "../../modules/admin-licenses/admin-licenses.service";
+import { RequestValidationError } from "../../modules/licensing/licensing.service";
+import { DuplicatePendingRequestError } from "../store/tier-request-store";
 
 /**
  * Errors thrown by `express.json()` (body-parser) rather than by our own code.
@@ -74,8 +83,45 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(403).json({ error: err.message, code: err.code });
     return;
   }
+  if (err instanceof QuotaExceededError) {
+    // 402: signed-in but out of scan allowance. Resolvable by an admin grant.
+    res.status(402).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof ScanBlockedError) {
+    // 403 like UserDisabledError, but a DISTINCT code: scanning-only block, login
+    // intact. Clients must branch on `code`, never on the shared 403 status.
+    res.status(403).json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof UserNotFoundError) {
     res.status(404).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof LicenseUserNotFoundError) {
+    // 404, distinct code from USER_NOT_FOUND — the license surface names its own.
+    res.status(404).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof LicenseValidationError) {
+    // 400 — a bad limit/amount/delta or unknown grant, with a machine code so
+    // the admin UI can surface the specific field error.
+    res.status(400).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof TierNotFoundError) {
+    res.status(404).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof RequestValidationError) {
+    // 400 — a malformed upgrade request (unknown tier, missing custom reason).
+    // Distinct code from LICENSE_INVALID so the user surface names its own.
+    res.status(400).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof DuplicatePendingRequestError) {
+    // 409 — a state conflict, not a bad request: the user already has one open.
+    res.status(409).json({ error: err.message, code: err.code });
     return;
   }
   if (err instanceof AdminNotConfiguredError) {

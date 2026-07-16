@@ -31,13 +31,21 @@ function handleUploadErrors(mw: RequestHandler): RequestHandler {
     });
 }
 
-export function createM1Router(store: CardSessionStore, uploadLimiter: RequestHandler): Router {
+export function createM1Router(
+  store: CardSessionStore,
+  uploadLimiter: RequestHandler,
+  requireAuth: RequestHandler
+): Router {
   const service = new ImageAcquisitionService(store);
   const router = Router();
 
   // POST /api/cards — docs/modules/M1-Image-Acquisition.md §5
   router.post(
     "/cards",
+    // requireAuth FIRST — the whole scan pipeline is metered per user (License
+    // Management), so an anonymous upload is rejected at the door, before we
+    // spend a rate-limit slot or buffer up to 10MB of image into memory.
+    requireAuth,
     // Before multer, deliberately: a rate-limited request should be rejected
     // without first buffering up to 10MB of image into memory.
     uploadLimiter,

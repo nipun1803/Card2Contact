@@ -39,7 +39,41 @@ export type MetricName =
   | "admin_login_failure"
   /** Admin User Management (Phase 1). */
   | "admin_user_disabled"
-  | "admin_user_restored";
+  | "admin_user_restored"
+  /**
+   * License Management / Scan Quota (Phase 1). `quota_low` is emitted by the
+   * guard when a successful consume leaves the user at or below a low-remaining
+   * threshold — an early-warning counter, not an error.
+   */
+  | "quota_consumed"
+  | "quota_exceeded"
+  | "quota_scan_blocked_hit"
+  | "quota_granted"
+  | "quota_grant_revoked"
+  | "quota_grant_expired"
+  | "quota_adjusted"
+  | "quota_reset"
+  | "quota_recalculated"
+  | "quota_override_set"
+  | "quota_override_cleared"
+  | "license_default_updated"
+  | "global_scanning_toggled"
+  | "scan_blocked"
+  | "scan_unblocked"
+  | "quota_low"
+  /** Tier layer (Phase 4). */
+  | "tier_created"
+  | "tier_updated"
+  | "tier_archived"
+  | "tier_cloned"
+  | "tier_assigned"
+  | "tier_changed"
+  | "tier_removed"
+  | "tier_bulk_assigned"
+  /** Tier Upgrade Requests. */
+  | "tier_request_created"
+  | "tier_request_approved"
+  | "tier_request_rejected";
 
 export type MetricLabels = Record<string, string>;
 

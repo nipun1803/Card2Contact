@@ -26,6 +26,13 @@ import { SheetsClient } from "../../src/modules/google-sheets/google-sheets.clie
 import { SheetsProvisioner } from "../../src/shared/sheets/sheets-provisioner";
 import { OcrClient } from "../../src/modules/text-recognition/text-recognition.client";
 import { SHEET_HEADER } from "../../src/modules/google-sheets/google-sheets.service";
+import { MemoryQuotaStore } from "../../src/shared/store/quota-store";
+import {
+  LicenseSettings,
+  MemoryLicenseSettingsStore,
+} from "../../src/shared/store/license-settings-store";
+import { MemoryTierStore } from "../../src/shared/store/tier-store";
+import { MemoryTierRequestStore } from "../../src/shared/store/tier-request-store";
 
 /**
  * A working in-memory CardSessionStore backed by a Map — behaves like the real
@@ -70,7 +77,7 @@ export function makeCardStore(seed: CardSession[] = []): CardSessionStore & {
 
 /** Fully-stubbed UserStore; override any method per test. */
 export function makeUserStore(overrides: Partial<UserStore> = {}): UserStore {
-  return {
+  const built: UserStore = {
     findById: vi.fn(async () => null),
     upsertOnLogin: vi.fn(async (input) => ({
       googleUserId: input.googleUserId,
@@ -101,8 +108,21 @@ export function makeUserStore(overrides: Partial<UserStore> = {}): UserStore {
     ),
     disable: vi.fn(async () => null),
     restore: vi.fn(async () => null),
+    emailsByIds: vi.fn(async (ids: string[]) => {
+      // Resolve through findById so a test that stubs findById to return a user
+      // also gets that user's email here — without each spec wiring both.
+      const store = built;
+      const entries = await Promise.all(
+        [...new Set(ids)].map(async (id) => {
+          const u = await store.findById(id);
+          return u ? ([id, u.email] as const) : null;
+        })
+      );
+      return new Map(entries.filter((e): e is readonly [string, string] => e !== null));
+    }),
     ...overrides,
   };
+  return built;
 }
 
 /** A complete UserRecord; override any field. Keeps specs from drifting as the
@@ -345,6 +365,37 @@ export function makeOcrClient(text: string | ((image: Buffer) => string) = "OCR 
       typeof text === "function" ? text(image) : text,
     ),
   };
+}
+
+/**
+ * License Management (Phase 1). Both stores are real in-memory behavior (like
+ * makeCardStore/makeSessionStore), since quota tests drive multi-step flows —
+ * grant, consume until exhausted, expire, block. `_setNow` on the quota store
+ * ages grants without sleeping.
+ */
+export function makeQuotaStore(): MemoryQuotaStore {
+  return new MemoryQuotaStore();
+}
+
+export function makeLicenseSettingsStore(
+  initial?: Partial<LicenseSettings>
+): MemoryLicenseSettingsStore {
+  return new MemoryLicenseSettingsStore(initial);
+}
+
+/**
+ * A seeded tier catalog. When a quotaStore is passed, its live assignment state
+ * feeds the tier store's "N users assigned" counts — mirroring production, where
+ * both Pg stores read the same tier_assignments table.
+ */
+export function makeTierStore(quotaStore?: MemoryQuotaStore): MemoryTierStore {
+  const tiers = new MemoryTierStore();
+  if (quotaStore) tiers._setCountsProvider(() => quotaStore.tierAssignedCounts());
+  return tiers;
+}
+
+export function makeTierRequestStore(): MemoryTierRequestStore {
+  return new MemoryTierRequestStore();
 }
 
 export type { UserRecord, TokenSet };

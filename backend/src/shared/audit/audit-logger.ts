@@ -52,7 +52,54 @@ export type AuditEvent =
    */
   | "admin_user_disabled"
   | "admin_user_restored"
-  | "admin_user_sessions_revoked";
+  | "admin_user_sessions_revoked"
+  /**
+   * License Management / Scan Quota (Phase 1). `quota_consumed` is the automatic
+   * per-scan event (no adminUsername); the rest are admin actions. Scan-Block is
+   * kept distinct from `admin_user_disabled` because it blocks only scanning, not
+   * login — a different subject the admin surface must be able to filter on its
+   * own. `quota_scan_blocked_hit`/`quota_exceeded` record an END USER being
+   * refused at OCR, not an admin action.
+   */
+  | "quota_consumed"
+  | "quota_exceeded"
+  | "quota_scan_blocked_hit"
+  | "quota_granted"
+  | "quota_grant_revoked"
+  | "quota_grant_expired"
+  | "quota_adjusted"
+  | "quota_reset"
+  | "quota_recalculated"
+  | "quota_override_set"
+  | "quota_override_cleared"
+  | "license_default_updated"
+  | "global_scanning_toggled"
+  | "scan_blocked"
+  | "scan_unblocked"
+  /**
+   * Tier layer (Phase 4). Catalog edits (`tier_created`/`updated`/`archived`/
+   * `cloned`) are app-wide config changes; the assignment events
+   * (`tier_assigned`/`changed`/`removed`/`bulk_assigned`) are per-user. Assign
+   * and change are distinct so the admin surface can filter "first assignment"
+   * from "moved between tiers".
+   */
+  | "tier_created"
+  | "tier_updated"
+  | "tier_archived"
+  | "tier_cloned"
+  | "tier_assigned"
+  | "tier_changed"
+  | "tier_removed"
+  | "tier_bulk_assigned"
+  /**
+   * Tier Upgrade Requests. `tier_request_created` is user-initiated (the only
+   * license event a non-admin causes); approve/reject are admin decisions. The
+   * grant itself still emits its own `tier_assigned`/`quota_granted`, so these
+   * three record the *workflow*, not the allowance change.
+   */
+  | "tier_request_created"
+  | "tier_request_approved"
+  | "tier_request_rejected";
 
 export interface AuditEntry {
   event: AuditEvent;

@@ -40,11 +40,20 @@ vi.mock("google-auth-library", () => ({
   })),
 }));
 
-import { buildTestApp } from "../helpers/app";
+import { buildAuthedTestApp } from "../helpers/app";
+import { makeLicenseSettingsStore } from "../mocks/stores";
 
 let app: Express;
+let cookie: string;
 beforeAll(() => {
-  app = buildTestApp();
+  // The pipeline is metered per user now: M1 requires a signed-in user and M2
+  // consumes quota. Drive it as an authenticated user with a generous free
+  // limit so quota never interferes with the pipeline-shape assertions below.
+  const authed = buildAuthedTestApp({
+    licenseSettingsStore: makeLicenseSettingsStore({ defaultFreeLimit: 1000 }),
+  });
+  app = authed.app;
+  cookie = authed.cookie;
 });
 
 const PNG = Buffer.from(
@@ -57,6 +66,7 @@ describe("M1→M4 pipeline over HTTP", () => {
     // M1
     const submit = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "single")
       .attach("frontImage", PNG, "card.png");
     expect(submit.status).toBe(201);
@@ -65,7 +75,9 @@ describe("M1→M4 pipeline over HTTP", () => {
     expect(cardId).toBeTruthy();
 
     // M2
-    const recognize = await request(app).post(`/api/cards/${cardId}/recognize`);
+    const recognize = await request(app)
+      .post(`/api/cards/${cardId}/recognize`)
+      .set("Cookie", cookie);
     expect(recognize.status).toBe(200);
     expect(recognize.body.rawText).toContain("Ada Lovelace");
 
@@ -90,7 +102,7 @@ describe("M1→M4 pipeline over HTTP", () => {
   });
 
   it("returns 400 when submitting a card with no image", async () => {
-    const res = await request(app).post("/api/cards").field("mode", "single");
+    const res = await request(app).post("/api/cards").set("Cookie", cookie).field("mode", "single");
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/without at least one image/);
   });
@@ -98,6 +110,7 @@ describe("M1→M4 pipeline over HTTP", () => {
   it("returns 400 for an invalid mode", async () => {
     const res = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "triple")
       .attach("frontImage", PNG, "card.png");
     expect(res.status).toBe(400);
@@ -107,6 +120,7 @@ describe("M1→M4 pipeline over HTTP", () => {
     const almostMax = Buffer.alloc(9 * 1024 * 1024, 0x7f);
     const res = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "single")
       .attach("frontImage", almostMax, "big.jpg");
     expect(res.status).toBe(201);
@@ -116,6 +130,7 @@ describe("M1→M4 pipeline over HTTP", () => {
     const tooBig = Buffer.alloc(11 * 1024 * 1024, 0x7f);
     const res = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "single")
       .attach("frontImage", tooBig, "huge.jpg");
     expect(res.status).toBe(400);
@@ -123,13 +138,14 @@ describe("M1→M4 pipeline over HTTP", () => {
   });
 
   it("returns 404 for recognize on an unknown card", async () => {
-    const res = await request(app).post("/api/cards/does-not-exist/recognize");
+    const res = await request(app).post("/api/cards/does-not-exist/recognize").set("Cookie", cookie);
     expect(res.status).toBe(404);
   });
 
   it("returns 409 when extract is called before recognize (out of order)", async () => {
     const submit = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "single")
       .attach("frontImage", PNG, "card.png");
     const cardId = submit.body.cardId;
@@ -142,16 +158,25 @@ describe("M1→M4 pipeline over HTTP", () => {
   it("returns 400 when confirming with an empty name", async () => {
     const submit = await request(app)
       .post("/api/cards")
+      .set("Cookie", cookie)
       .field("mode", "single")
       .attach("frontImage", PNG, "card.png");
     const cardId = submit.body.cardId;
-    await request(app).post(`/api/cards/${cardId}/recognize`);
+    await request(app).post(`/api/cards/${cardId}/recognize`).set("Cookie", cookie);
     await request(app).post(`/api/cards/${cardId}/extract`);
     await request(app).patch(`/api/cards/${cardId}/contact`).send({ name: "" });
 
     const res = await request(app).post(`/api/cards/${cardId}/confirm`);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Name is required/);
+  });
+
+  it("401s an anonymous M1 upload — the scan pipeline requires sign-in now", async () => {
+    const res = await request(app)
+      .post("/api/cards")
+      .field("mode", "single")
+      .attach("frontImage", PNG, "card.png");
+    expect(res.status).toBe(401);
   });
 });
 
