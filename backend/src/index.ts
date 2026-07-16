@@ -5,7 +5,7 @@ import { initSchemaWithRetry } from "./shared/db/init";
 import { PgUserStore } from "./shared/store/user-store";
 import { PgSessionStore } from "./shared/store/session-store";
 import { AesGcmTokenCodec, decodeEncryptionKey } from "./shared/store/token-codec";
-import { StdoutAuditLogger } from "./shared/audit/audit-logger";
+import { PgAuditLogger } from "./shared/audit/pg-audit-logger";
 import { StdoutMetrics } from "./shared/observability/metrics";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
 
   const userStore = new PgUserStore(pool, codec);
   const sessionStore = new PgSessionStore(pool);
-  const audit = new StdoutAuditLogger();
+  const audit = new PgAuditLogger(pool);
   const metrics = new StdoutMetrics();
   metrics.start();
 

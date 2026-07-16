@@ -3,7 +3,7 @@ import { M5Service } from "./google-sheets.service";
 import { CardSessionStore } from "../../shared/store/card-session-store";
 import { createGoogleSheetsClient } from "./google-sheets.client";
 import { GoogleAuthService } from "../google-auth/google-auth.service";
-import { ReauthRequiredError, ValidationError } from "../../shared/http/pipeline-errors";
+import { ReauthRequiredError, UserDisabledError, ValidationError } from "../../shared/http/pipeline-errors";
 import { UserStore } from "../../shared/store/user-store";
 import { SheetsProvisioner } from "../../shared/sheets/sheets-provisioner";
 import { AuditLogger } from "../../shared/audit/audit-logger";
@@ -34,6 +34,13 @@ export function createM5Router(
   router.post("/contacts/save", requireAuth, saveLimiter, async (req, res, next) => {
     const { user, sessionId } = req.auth!; // requireAuth guarantees this
     try {
+      // Admin User Management: a disabled user's row (and any pre-existing
+      // session) must not be able to save contacts. `user` already carries
+      // disabledAt for free — the session middleware loaded the full record.
+      if (user.disabledAt) {
+        throw new UserDisabledError();
+      }
+
       const { cardId, contact } = req.body ?? {};
       if (typeof cardId !== "string" || cardId.trim() === "") {
         throw new ValidationError("cardId is required");

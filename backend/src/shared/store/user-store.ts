@@ -24,6 +24,16 @@ export interface UserRecord {
   tokenExpiry: number | null; // epoch ms (google-auth-library Credentials.expiry_date)
   /** Running total of contacts this user has saved (M5), tracked in Postgres. */
   savedContactsCount: number;
+  createdAt: Date;
+  lastLoginAt: Date | null;
+  /** Null = enabled. Set by an admin Revoke Access action; cleared by Restore. */
+  disabledAt: Date | null;
+  /** Admin username that disabled this user, if currently disabled. */
+  disabledBy: string | null;
+  /** Last restore timestamp, if this user was ever restored. */
+  restoredAt: Date | null;
+  /** Admin username that performed the last restore. */
+  restoredBy: string | null;
 }
 
 /** Identifying details of a user's provisioned spreadsheet. */
@@ -43,6 +53,42 @@ export interface TokenSet {
   accessToken: string | null;
   refreshToken: string | null;
   tokenExpiry: number | null;
+}
+
+export type UserStatusFilter = "all" | "active" | "disabled";
+export type UserSortField = "createdAt" | "lastLoginAt" | "savedContactsCount" | "email";
+export type SortDirection = "asc" | "desc";
+
+export interface ListUsersParams {
+  /** Cursor pagination — omit for the first page. Stable under concurrent
+   * writes, unlike OFFSET, which can skip/duplicate rows if a user is
+   * disabled/restored between two page loads. */
+  cursor?: string;
+  limit: number; // capped server-side at 100
+  search?: string; // matches email (ILIKE) and googleUserId (exact)
+  status?: UserStatusFilter;
+  registeredAfter?: string; // ISO date — filters createdAt >=
+  registeredBefore?: string; // ISO date — filters createdAt <=
+  lastLoginAfter?: string; // ISO date — filters lastLoginAt >=
+  sortField?: UserSortField;
+  sortDirection?: SortDirection;
+}
+
+export interface ListUsersResult {
+  users: UserRecord[];
+  nextCursor: string | null;
+  total: number;
+  totalPages: number;
+}
+
+export interface UserStats {
+  total: number;
+  active: number;
+  disabled: number;
+  /** Users who logged in within the last 24h. */
+  recentLogins: number;
+  /** App-wide total of successful M5 saves ("scans") across every user. */
+  totalScans: number;
 }
 
 /**
@@ -68,6 +114,25 @@ export interface UserStore {
   clearTokens(googleUserId: string): Promise<void>;
   /** Atomically bump the running saved-contacts total by one; returns the new total. */
   incrementSavedContactsCount(googleUserId: string): Promise<number>;
+  /** Admin User Management: search/filter/sort/paginate the user directory. */
+  list(params: ListUsersParams): Promise<ListUsersResult>;
+  /** Global (unfiltered) counts for the admin dashboard summary cards. */
+  stats(): Promise<UserStats>;
+  /**
+   * Revoke Access. Sets disabled_at = now(), disabled_by = adminUsername;
+   * idempotent — re-disabling an already-disabled user changes neither the
+   * timestamp nor the actor (first disable wins). Returns null if the user
+   * doesn't exist.
+   */
+  disable(googleUserId: string, adminUsername: string): Promise<UserRecord | null>;
+  /**
+   * Restore Access. Clears disabled_at/disabled_by, sets restored_at/restored_by.
+   * Restoring an already-active user is still a no-op on the disabled flag but
+   * still stamps restoredAt/restoredBy (last-restore-wins), since "who last
+   * restored this row" is meaningful even for a no-op re-restore. Returns null
+   * if the user doesn't exist.
+   */
+  restore(googleUserId: string, adminUsername: string): Promise<UserRecord | null>;
 }
 
 interface UserRow {
@@ -80,10 +145,17 @@ interface UserRow {
   refresh_token: string | null;
   token_expiry: string | null; // pg returns BIGINT as string
   saved_contacts_count: number;
+  created_at: Date;
+  last_login_at: Date | null;
+  disabled_at: Date | null;
+  disabled_by: string | null;
+  restored_at: Date | null;
+  restored_by: string | null;
 }
 
 const USER_COLUMNS = `google_user_id, email, spreadsheet_id, spreadsheet_url, spreadsheet_title,
-                      access_token, refresh_token, token_expiry, saved_contacts_count`;
+                      access_token, refresh_token, token_expiry, saved_contacts_count,
+                      created_at, last_login_at, disabled_at, disabled_by, restored_at, restored_by`;
 
 export class PgUserStore implements UserStore {
   constructor(
@@ -131,6 +203,12 @@ export class PgUserStore implements UserStore {
       refreshToken: this.dec(row.refresh_token, row.google_user_id, "refresh_token"),
       tokenExpiry: row.token_expiry === null ? null : Number(row.token_expiry),
       savedContactsCount: row.saved_contacts_count,
+      createdAt: row.created_at,
+      lastLoginAt: row.last_login_at,
+      disabledAt: row.disabled_at,
+      disabledBy: row.disabled_by,
+      restoredAt: row.restored_at,
+      restoredBy: row.restored_by,
     };
   }
 
@@ -214,4 +292,139 @@ export class PgUserStore implements UserStore {
       [googleUserId]
     );
   }
+
+  async list(params: ListUsersParams): Promise<ListUsersResult> {
+    const limit = Math.min(100, Math.max(1, params.limit));
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+
+    if (params.status === "active") conditions.push("disabled_at IS NULL");
+    if (params.status === "disabled") conditions.push("disabled_at IS NOT NULL");
+    if (params.search) {
+      values.push(`%${params.search}%`, params.search);
+      conditions.push(`(email ILIKE $${values.length - 1} OR google_user_id = $${values.length})`);
+    }
+    if (params.registeredAfter) {
+      values.push(params.registeredAfter);
+      conditions.push(`created_at >= $${values.length}`);
+    }
+    if (params.registeredBefore) {
+      values.push(params.registeredBefore);
+      conditions.push(`created_at <= $${values.length}`);
+    }
+    if (params.lastLoginAfter) {
+      values.push(params.lastLoginAfter);
+      conditions.push(`last_login_at >= $${values.length}`);
+    }
+
+    const sortColumn = {
+      createdAt: "created_at",
+      lastLoginAt: "last_login_at",
+      savedContactsCount: "saved_contacts_count",
+      email: "email",
+    }[params.sortField ?? "createdAt"];
+    const direction = params.sortDirection === "asc" ? "ASC" : "DESC";
+    const cmp = direction === "ASC" ? ">" : "<";
+
+    // Count uses the filter conditions only — captured before any cursor
+    // condition is appended, since "how many total rows match" must not
+    // depend on which page we're currently on.
+    const countWhere = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const countResult = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*) FROM users ${countWhere}`,
+      values
+    );
+    const total = Number(countResult.rows[0].count);
+
+    if (params.cursor) {
+      const { sortValue, googleUserId } = decodeUserCursor(params.cursor);
+      values.push(sortValue, googleUserId);
+      // Keyset pagination: strictly past the cursor row, using google_user_id
+      // as a tiebreaker so exact ties in sortColumn don't repeat/skip rows.
+      conditions.push(`(${sortColumn}, google_user_id) ${cmp} ($${values.length - 1}, $${values.length})`);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    values.push(limit + 1); // fetch one extra row to know if there's a next page
+    const { rows } = await this.pool.query<UserRow>(
+      `SELECT ${USER_COLUMNS} FROM users ${where}
+       ORDER BY ${sortColumn} ${direction}, google_user_id ${direction}
+       LIMIT $${values.length}`,
+      values
+    );
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit).map((r) => this.toRecord(r));
+    const last = page[page.length - 1];
+    const sortField = params.sortField ?? "createdAt";
+    const nextCursor =
+      hasMore && last
+        ? encodeUserCursor({ sortValue: String(last[sortField]), googleUserId: last.googleUserId })
+        : null;
+
+    return { users: page, nextCursor, total, totalPages: Math.ceil(total / limit) };
+  }
+
+  async stats(): Promise<UserStats> {
+    const { rows } = await this.pool.query<{
+      total: string;
+      active: string;
+      disabled: string;
+      recent_logins: string;
+      total_scans: string;
+    }>(
+      `SELECT COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE disabled_at IS NULL) AS active,
+              COUNT(*) FILTER (WHERE disabled_at IS NOT NULL) AS disabled,
+              COUNT(*) FILTER (WHERE last_login_at >= now() - INTERVAL '24 hours') AS recent_logins,
+              COALESCE(SUM(saved_contacts_count), 0) AS total_scans
+         FROM users`
+    );
+    const r = rows[0];
+    return {
+      total: Number(r.total),
+      active: Number(r.active),
+      disabled: Number(r.disabled),
+      recentLogins: Number(r.recent_logins),
+      totalScans: Number(r.total_scans),
+    };
+  }
+
+  async disable(googleUserId: string, adminUsername: string): Promise<UserRecord | null> {
+    const { rows } = await this.pool.query<UserRow>(
+      `UPDATE users
+          SET disabled_at = COALESCE(disabled_at, now()),
+              disabled_by = COALESCE(disabled_by, $2),
+              updated_at = now()
+        WHERE google_user_id = $1
+        RETURNING ${USER_COLUMNS}`,
+      [googleUserId, adminUsername]
+    );
+    return rows.length ? this.toRecord(rows[0]) : null;
+  }
+
+  async restore(googleUserId: string, adminUsername: string): Promise<UserRecord | null> {
+    const { rows } = await this.pool.query<UserRow>(
+      `UPDATE users
+          SET disabled_at = NULL, disabled_by = NULL,
+              restored_at = now(), restored_by = $2,
+              updated_at = now()
+        WHERE google_user_id = $1
+        RETURNING ${USER_COLUMNS}`,
+      [googleUserId, adminUsername]
+    );
+    return rows.length ? this.toRecord(rows[0]) : null;
+  }
+}
+
+interface UserCursor {
+  sortValue: string;
+  googleUserId: string;
+}
+
+function encodeUserCursor(cursor: UserCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeUserCursor(cursor: string): UserCursor {
+  return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
 }

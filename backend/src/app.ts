@@ -35,6 +35,8 @@ import { createGoogleAuthRouter } from "./modules/google-auth/google-auth.router
 import { resolveAdminConfig } from "./modules/admin-auth/admin-auth.config";
 import { AdminAuthService } from "./modules/admin-auth/admin-auth.service";
 import { createAdminAuthRouter } from "./modules/admin-auth/admin-auth.router";
+import { AdminUserService } from "./modules/admin-users/admin-users.service";
+import { createAdminUsersRouter } from "./modules/admin-users/admin-users.router";
 
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
@@ -217,7 +219,11 @@ export function createApp(deps: {
    * Note createSessionMiddleware skips /api/admin entirely (see session.ts):
    * admin requests carry no user identity, and a revoked *Google* session must
    * not 401 the *admin* panel.
+   *
+   * One `adminAuth` instance, reused by every admin router mounted below —
+   * not re-instantiated per router.
    */
+  const adminAuth = createAdminAuth(adminService, audit, metrics);
   app.use(
     "/api/admin",
     createAdminAuthRouter({
@@ -225,8 +231,21 @@ export function createApp(deps: {
       audit,
       metrics,
       loginLimiter: createAdminLoginLimiter(limiterDeps),
-      adminAuth: createAdminAuth(adminService, audit, metrics),
+      adminAuth,
     })
+  );
+
+  /**
+   * Admin User Management (Phase 1). Needs no "not configured" null-path the
+   * way AdminAuthService does — user management is meaningless without admin
+   * auth being configured at all, and this router already sits behind
+   * `adminAuth`, which itself throws AdminNotConfiguredError when the admin
+   * service is null.
+   */
+  const adminUserService = new AdminUserService(userStore, sessionStore, audit, metrics);
+  app.use(
+    "/api/admin",
+    createAdminUsersRouter({ service: adminUserService, adminAuth })
   );
 
   app.use(errorHandler);

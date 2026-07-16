@@ -5,6 +5,7 @@ import {
   PipelineOrderError,
   ReauthRequiredError,
   SessionRevokedError,
+  UserDisabledError,
   ValidationError,
 } from "./pipeline-errors";
 import {
@@ -12,6 +13,7 @@ import {
   AdminNotAuthenticatedError,
   AdminNotConfiguredError,
 } from "./admin-errors";
+import { UserNotFoundError } from "../../modules/admin-users/admin-users.service";
 
 /**
  * Errors thrown by `express.json()` (body-parser) rather than by our own code.
@@ -65,6 +67,15 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     // Before NotAuthenticatedError: both are 401, and the specific case must
     // win so the frontend can explain *why* the user was signed out.
     res.status(401).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof UserDisabledError) {
+    // 403, not 401: the credential is valid, access is administratively denied.
+    res.status(403).json({ error: err.message, code: err.code });
+    return;
+  }
+  if (err instanceof UserNotFoundError) {
+    res.status(404).json({ error: err.message, code: err.code });
     return;
   }
   if (err instanceof AdminNotConfiguredError) {

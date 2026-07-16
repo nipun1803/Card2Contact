@@ -186,7 +186,8 @@ export function createSessionMiddleware(
       const session = await sessionStore.findActive(sessionId);
       if (!session) {
         // Distinguish revoked (tell them) from unknown/expired (anonymous).
-        if (await sessionStore.isRevoked(sessionId)) {
+        const revokedReason = await sessionStore.getRevokedReason(sessionId);
+        if (revokedReason) {
           // Stop the dead id being re-sent on every subsequent request.
           clearSessionCookie(res);
           audit.log({
@@ -196,7 +197,7 @@ export function createSessionMiddleware(
             ...fingerprint(req),
           });
           metrics.inc("auth_failure", { reason: "session_revoked" });
-          return next(new SessionRevokedError());
+          return next(new SessionRevokedError(revokedReason));
         }
         clearSessionCookie(res);
         return next();

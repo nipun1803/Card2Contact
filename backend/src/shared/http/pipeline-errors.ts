@@ -42,11 +42,20 @@ export class ReauthRequiredError extends Error {
 }
 
 /**
- * Thrown when a request presents a session that was explicitly revoked — almost
- * always Session Replacement (the user signed in on another device). Distinct
- * from NotAuthenticatedError (never signed in): this user WAS signed in and was
- * signed out elsewhere, so the frontend explains why rather than bouncing to
+ * Thrown when a request presents a session that was explicitly revoked. Two
+ * distinct causes share this error: Session Replacement (the user signed in
+ * on another device) and an admin's Revoke Access / Force Logout. Distinct
+ * from NotAuthenticatedError (never signed in): this user WAS signed in and
+ * was signed out, so the frontend explains why rather than bouncing to
  * /login silently. 401 with `code: "SESSION_REVOKED"`.
+ *
+ * The message must not claim "another device" for an admin-initiated revoke —
+ * that is simply false, and confusing enough that a user might suspect their
+ * account was compromised when in fact an operator acted on it. The reason
+ * passed in picks the honest message; it is not itself exposed to the client
+ * (see `RevokeReason`'s doc comment — "never to the client" — and the admin
+ * username is never named here either, matching how audit entries never
+ * surface the acting admin to the affected user).
  *
  * Note this is raised by the session middleware, not by requireAuth: the
  * endpoint that actually notices a revocation is the public
@@ -56,10 +65,28 @@ export class ReauthRequiredError extends Error {
  */
 export class SessionRevokedError extends Error {
   readonly code = "SESSION_REVOKED";
-  constructor(
-    message = "Your session was ended because you signed in on another device"
-  ) {
-    super(message);
+  constructor(reason?: "replaced_by_new_login" | "user_revoked" | "logout") {
+    super(
+      reason === "user_revoked"
+        ? "Your session was ended by an administrator"
+        : "Your session was ended because you signed in on another device"
+    );
     this.name = "SessionRevokedError";
+  }
+}
+
+/**
+ * Thrown when a disabled user's Google OAuth callback would otherwise create a
+ * new session, or an M5 action is attempted by a user disabled mid-session.
+ * Distinct from SessionRevokedError (a specific session was ended) and
+ * ReauthRequiredError (Google itself rejected the tokens): this is an admin
+ * decision, not a session or token lifecycle event. 403 — the credential is
+ * valid, but access is administratively denied.
+ */
+export class UserDisabledError extends Error {
+  readonly code = "USER_DISABLED";
+  constructor(message = "This account has been disabled") {
+    super(message);
+    this.name = "UserDisabledError";
   }
 }

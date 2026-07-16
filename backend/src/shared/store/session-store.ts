@@ -97,6 +97,12 @@ export interface SessionStore {
    * (treat as anonymous)? Expiry is not revocation.
    */
   isRevoked(id: string): Promise<boolean>;
+  /**
+   * Why a revoked id was revoked, so the caller can pick an honest message —
+   * "signed in elsewhere" is simply false when an admin ended the session.
+   * Null if the id isn't revoked (or unknown); never throws for that case.
+   */
+  getRevokedReason(id: string): Promise<RevokeReason | null>;
   /** Bump last_activity_at. Throttled by the caller; never awaited on the hot path. */
   touch(id: string): Promise<void>;
   revoke(id: string, reason: RevokeReason): Promise<void>;
@@ -203,6 +209,14 @@ export class PgSessionStore implements SessionStore {
       [id]
     );
     return rows.length > 0;
+  }
+
+  async getRevokedReason(id: string): Promise<RevokeReason | null> {
+    const { rows } = await this.pool.query<{ revoked_reason: RevokeReason | null }>(
+      `SELECT revoked_reason FROM sessions WHERE id = $1 AND revoked_at IS NOT NULL`,
+      [id]
+    );
+    return rows.length ? rows[0].revoked_reason : null;
   }
 
   async touch(id: string): Promise<void> {

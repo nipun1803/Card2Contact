@@ -42,7 +42,17 @@ export type AuditEvent =
    */
   | "admin_login"
   | "admin_logout"
-  | "admin_auth_failure";
+  | "admin_auth_failure"
+  /**
+   * Admin User Management (Phase 1). `admin_user_sessions_revoked` is
+   * separate from `session_terminated`/`session_replaced` because the
+   * *reason* class differs (admin action vs. self-service logout vs.
+   * login-elsewhere) and the admin surface needs to filter specifically for
+   * "an admin forced this."
+   */
+  | "admin_user_disabled"
+  | "admin_user_restored"
+  | "admin_user_sessions_revoked";
 
 export interface AuditEntry {
   event: AuditEvent;
@@ -81,6 +91,21 @@ export interface AuditEntry {
   revokedCount?: number;
 }
 
+/** Query params for reading back audit history — Admin User Management (Phase 1). */
+export interface AuditQuery {
+  googleUserId?: string;
+  event?: AuditEvent;
+  /** Opaque, encodes (ts, id) — cursor pagination, stable under concurrent inserts. */
+  cursor?: string;
+  limit?: number;
+}
+
+export interface AuditQueryResult {
+  entries: (AuditEntry & { id: number; ts: string })[];
+  nextCursor: string | null;
+  total: number;
+}
+
 /**
  * Audit sink. An interface rather than a bare console.log so call sites depend
  * on the contract, tests assert on structured entries instead of scraping
@@ -88,15 +113,23 @@ export interface AuditEntry {
  */
 export interface AuditLogger {
   log(entry: AuditEntry): void;
+  /** Optional: only a Postgres-backed sink implements real querying. */
+  query?(params: AuditQuery): Promise<AuditQueryResult>;
 }
 
 /** Enough to correlate events within a session; useless as a credential. */
 const SESSION_ID_LOG_LENGTH = 8;
 
 /**
- * Emits one JSON object per line to stdout, for `docker logs`. Deliberately not
- * an audit table: an append-only table needs retention, indexing, and migration
- * for a payload the container platform already captures and rotates.
+ * Emits one JSON object per line to stdout, for `docker logs`.
+ *
+ * Historically this was the ONLY sink — deliberately not an audit table, since
+ * retention/indexing/migration cost wasn't justified. Admin User Management
+ * (Phase 1) supersedes that: the admin surface needs queryable per-user
+ * history, which stdout cannot serve. See PgAuditLogger, which dual-writes
+ * here AND to the new `audit_log` table — this class still exists standalone
+ * for tests and for any composition root that doesn't want Postgres-backed
+ * audit querying.
  */
 export class StdoutAuditLogger implements AuditLogger {
   log(entry: AuditEntry): void {
@@ -122,13 +155,47 @@ export class StdoutAuditLogger implements AuditLogger {
 /** Test double — captures entries for assertions. */
 export class MemoryAuditLogger implements AuditLogger {
   readonly entries: AuditEntry[] = [];
+  private nextId = 1;
+  private readonly ids = new WeakMap<AuditEntry, number>();
+  private readonly timestamps = new WeakMap<AuditEntry, string>();
 
   log(entry: AuditEntry): void {
+    this.ids.set(entry, this.nextId++);
+    this.timestamps.set(entry, new Date().toISOString());
     this.entries.push(entry);
   }
 
   /** All entries for one event type, for concise assertions. */
   ofType(event: AuditEvent): AuditEntry[] {
     return this.entries.filter((e) => e.event === event);
+  }
+
+  /** In-memory equivalent of PgAuditLogger.query(), so AdminUserService unit
+   * tests can inject this without a real Postgres. Cursor is the entry's id,
+   * newest first, matching the Postgres sink's ORDER BY ts DESC, id DESC. */
+  async query(params: AuditQuery): Promise<AuditQueryResult> {
+    const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+    let matches = this.entries
+      .map((e) => ({ entry: e, id: this.ids.get(e)!, ts: this.timestamps.get(e)! }))
+      .filter((m) => (params.googleUserId ? m.entry.googleUserId === params.googleUserId : true))
+      .filter((m) => (params.event ? m.entry.event === params.event : true))
+      .sort((a, b) => b.id - a.id);
+
+    const total = matches.length;
+    if (params.cursor) {
+      const cursorId = Number(Buffer.from(params.cursor, "base64url").toString("utf8"));
+      matches = matches.filter((m) => m.id < cursorId);
+    }
+    const page = matches.slice(0, limit + 1);
+    const hasMore = page.length > limit;
+    const pageEntries = page.slice(0, limit);
+    const last = pageEntries[pageEntries.length - 1];
+    const nextCursor = hasMore && last ? Buffer.from(String(last.id)).toString("base64url") : null;
+
+    return {
+      total,
+      nextCursor,
+      entries: pageEntries.map((m) => ({ ...m.entry, id: m.id, ts: m.ts })),
+    };
   }
 }

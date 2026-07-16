@@ -54,6 +54,30 @@ export async function initSchema(pool: Pool): Promise<void> {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS spreadsheet_title TEXT;
   `);
+  // Admin User Management (Phase 1): soft-disable a user's access without
+  // deleting their row (contacts/history must survive). NULL = enabled (the
+  // default for every pre-existing row — no backfill needed, absence of a
+  // value IS "not disabled"). disabled_by/restored_by store the admin
+  // username that performed the action — plain text, not a FK (there is only
+  // ever one admin operator today) — recorded structurally so "who did this"
+  // survives independent of audit_log. restored_at/restored_by are set on
+  // every restore call (not just cleared) so "last restored" is queryable
+  // without joining audit_log.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+  `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_by TEXT;
+  `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS restored_at TIMESTAMPTZ;
+  `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS restored_by TEXT;
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS users_disabled_idx ON users (disabled_at) WHERE disabled_at IS NOT NULL;
+  `);
 
   /**
    * One row per browser session. The id is an opaque 256-bit random value
@@ -115,6 +139,53 @@ export async function initSchema(pool: Pool): Promise<void> {
   `);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS pending_sessions_expires_idx ON pending_sessions (expires_at);
+  `);
+
+  /**
+   * Admin User Management (Phase 1): insert-only audit history, queryable by
+   * the admin User Details page.
+   *
+   * ARCHITECTURE DECISION CHANGE: audit logging used to be stdout-only,
+   * deliberately not a table (retention/indexing/migration cost wasn't
+   * justified). This supersedes that: the admin surface needs queryable
+   * per-user history (login, revoke/restore, reconnect, sheet recreation,
+   * contact saves), which stdout cannot serve. AuditLogger now dual-writes:
+   * Postgres for querying, stdout unchanged for the existing `docker logs`
+   * ops workflow. See docs/ARCHITECTURE.md's "Audit logging & metrics"
+   * section for the full rationale.
+   *
+   * Same field policy as the stdout sink: no tokens, no email, no contact
+   * data, no raw UA, sessionId truncated to 8 chars — enforced in the sink
+   * (PgAuditLogger), not by callers.
+   *
+   * No FK from google_user_id to users — deliberate: audit rows must outlive
+   * the thing they describe, and some failure events may reference a
+   * googleUserId that never resolved to a persisted row.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id             BIGSERIAL PRIMARY KEY,
+      ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
+      event          TEXT NOT NULL,
+      google_user_id TEXT,
+      admin_username TEXT,
+      session_id     TEXT,
+      device         TEXT,
+      browser        TEXT,
+      ip             TEXT,
+      outcome        TEXT,
+      reason         TEXT,
+      card_id        TEXT,
+      revoked_count  INTEGER
+    );
+  `);
+  // Two access patterns the admin surface needs: "history for this user" and
+  // "recent events across everyone" (future-proofing, not used by Phase 1 UI).
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS audit_log_user_ts_idx ON audit_log (google_user_id, ts DESC);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC);
   `);
 
   await wipePlaintextTokens(pool);

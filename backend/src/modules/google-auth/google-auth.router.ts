@@ -1,6 +1,6 @@
 import { RequestHandler, Router } from "express";
 import { GoogleAuthService } from "./google-auth.service";
-import { NotAuthenticatedError, ValidationError } from "../../shared/http/pipeline-errors";
+import { NotAuthenticatedError, UserDisabledError, ValidationError } from "../../shared/http/pipeline-errors";
 import { UserStore, spreadsheetUrlFor } from "../../shared/store/user-store";
 import { SessionStore } from "../../shared/store/session-store";
 import { SheetsProvisioner } from "../../shared/sheets/sheets-provisioner";
@@ -86,6 +86,17 @@ export function createGoogleAuthRouter(deps: GoogleAuthRouterDeps): Router {
         email: identity.email,
         ...identity.tokens,
       });
+
+      // Admin User Management: block a disabled user before any session work.
+      // Checked before the Session Conflict branch so a disabled account's
+      // existing session (if a background force-logout raced) is never
+      // replaced/extended, and the pending-session flow is never entered.
+      if (user.disabledAt) {
+        const fp = fingerprint(req);
+        audit.log({ event: "auth_failure", reason: "user_disabled", googleUserId: user.googleUserId, ...fp });
+        metrics.inc("auth_failure", { reason: "user_disabled" });
+        throw new UserDisabledError();
+      }
 
       // A user who already has a sheet is re-consenting (Reconnect), not
       // signing in for the first time.

@@ -36,7 +36,10 @@ export type MetricName =
    * rate_limit_exceeded{endpoint=admin_login} via the shared limiter.
    */
   | "admin_login_success"
-  | "admin_login_failure";
+  | "admin_login_failure"
+  /** Admin User Management (Phase 1). */
+  | "admin_user_disabled"
+  | "admin_user_restored";
 
 export type MetricLabels = Record<string, string>;
 
