@@ -1,5 +1,6 @@
 import type { Contact, ContactEdits } from "@/shared/types/contact";
 import type {
+  AdminMe,
   AuthStatus,
   CardMode,
   ConfirmResponse,
@@ -117,6 +118,39 @@ export async function continueSession(): Promise<void> {
 /** Abandon this sign-in and leave the other device signed in. */
 export async function cancelSession(): Promise<void> {
   await request<{ ok: true }>("/api/auth/session/cancel", { method: "POST" });
+}
+
+/* ---- Admin auth ---------------------------------------------------------- */
+
+/**
+ * The operator login, entirely separate from the Google flow above. All three
+ * ride the `admin_session` cookie via `request`'s credentials: "include".
+ *
+ * These deliberately need no special-casing in `request`: the backend's admin
+ * codes (ADMIN_INVALID_CREDENTIALS / ADMIN_NOT_AUTHENTICATED /
+ * ADMIN_NOT_CONFIGURED) are distinct from REAUTH_REQUIRED and SESSION_REVOKED,
+ * so they fall through to a plain ApiError carrying the status — which is
+ * exactly right. An admin 401 must never be mistaken for a Google Session
+ * Revocation and bounce the user to /login.
+ */
+
+/** 401 (bad credentials), 429 (rate limited), or 503 (admin not configured). */
+export async function adminLogin(username: string, password: string): Promise<AdminMe> {
+  return request<AdminMe>("/api/admin/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+/** Idempotent — succeeds even with no session. */
+export async function adminLogout(): Promise<void> {
+  await request<{ ok: true }>("/api/admin/auth/logout", { method: "POST" });
+}
+
+/** 401 when there is no live Admin Session — a definitive answer, not an error. */
+export function getAdminMe(): Promise<AdminMe> {
+  return request<AdminMe>("/api/admin/auth/me");
 }
 
 /* ---- Pipeline ------------------------------------------------------------ */

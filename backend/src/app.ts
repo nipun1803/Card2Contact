@@ -7,11 +7,17 @@ import { errorHandler } from "./shared/http/error-handler";
 import { createSessionMiddleware } from "./shared/http/session";
 import { createRequireAuth } from "./shared/http/require-auth";
 import {
+  createAdminLoginLimiter,
   createOAuthLimiter,
   createSaveLimiter,
   createSessionLimiter,
   createUploadLimiter,
 } from "./shared/http/rate-limit";
+import { createAdminAuth } from "./shared/http/admin-auth";
+import {
+  AdminSessionStore,
+  InMemoryAdminSessionStore,
+} from "./shared/store/admin-session-store";
 import { UserRecord, UserStore, spreadsheetUrlFor } from "./shared/store/user-store";
 import { SessionStore } from "./shared/store/session-store";
 import { AuditLogger, StdoutAuditLogger } from "./shared/audit/audit-logger";
@@ -26,6 +32,9 @@ import { createGoogleSheetsClient } from "./modules/google-sheets/google-sheets.
 import { SHEET_HEADER, SPREADSHEET_TITLE } from "./modules/google-sheets/google-sheets.service";
 import { GoogleAuthService } from "./modules/google-auth/google-auth.service";
 import { createGoogleAuthRouter } from "./modules/google-auth/google-auth.router";
+import { resolveAdminConfig } from "./modules/admin-auth/admin-auth.config";
+import { AdminAuthService } from "./modules/admin-auth/admin-auth.service";
+import { createAdminAuthRouter } from "./modules/admin-auth/admin-auth.router";
 
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
@@ -93,12 +102,19 @@ export function createApp(deps: {
   sessionStore: SessionStore;
   audit?: AuditLogger;
   metrics?: Metrics;
+  /**
+   * Admin Sessions. Defaulted internally because the implementation is
+   * in-memory and needs no DB — which is exactly why index.ts has nothing to
+   * wire here. Injectable so a test can age sessions via _setNow().
+   */
+  adminSessionStore?: AdminSessionStore;
 }): Express {
   const {
     userStore,
     sessionStore,
     audit = new StdoutAuditLogger(),
     metrics = new StdoutMetrics(),
+    adminSessionStore = new InMemoryAdminSessionStore(),
   } = deps;
   const app = express();
 
@@ -123,6 +139,21 @@ export function createApp(deps: {
   const googleAuthService = createGoogleAuthService();
   const provisioner = createSheetsProvisioner(userStore);
   const limiterDeps = { audit, metrics };
+
+  /**
+   * Admin authentication is OPT-IN: with ADMIN_USERNAME/ADMIN_PASSWORD_HASH
+   * unset this resolves to null, the service is never built, and the admin
+   * routes answer 503. That is why this cannot throw the way SESSION_SECRET
+   * does — every deployment predating this feature must still boot, and the
+   * whole test suite runs on exactly this path.
+   *
+   * It DOES throw for a half-configured or malformed credential (see
+   * resolveAdminConfig): absent is off, present is strictly validated.
+   */
+  const adminConfig = resolveAdminConfig();
+  const adminService = adminConfig
+    ? new AdminAuthService(adminConfig, adminSessionStore)
+    : null;
 
   // Credentialed CORS with an explicit origin — a wildcard origin is illegal
   // once cookies (credentials) are sent, so the session cookie can ride along.
@@ -175,6 +206,26 @@ export function createApp(deps: {
       spreadsheetTitle: SPREADSHEET_TITLE,
       oauthLimiter: createOAuthLimiter(limiterDeps),
       sessionLimiter: createSessionLimiter(limiterDeps),
+    })
+  );
+
+  /**
+   * Admin routes, on their own mount path — the one thing that makes "every
+   * future /api/admin/* route is guarded" structural rather than conventional:
+   * a future admin router mounts here and applies the same `adminAuth`.
+   *
+   * Note createSessionMiddleware skips /api/admin entirely (see session.ts):
+   * admin requests carry no user identity, and a revoked *Google* session must
+   * not 401 the *admin* panel.
+   */
+  app.use(
+    "/api/admin",
+    createAdminAuthRouter({
+      service: adminService,
+      audit,
+      metrics,
+      loginLimiter: createAdminLoginLimiter(limiterDeps),
+      adminAuth: createAdminAuth(adminService, audit, metrics),
     })
   );
 

@@ -52,3 +52,11 @@ export interface AuthStatus {
   lastSyncedAt?: string;
   savedContactsCount?: number;
 }
+
+/**
+ * GET /api/admin/auth/me and POST /api/admin/auth/login both return this.
+ * The admin has no profile beyond the configured username in Phase 0.1.
+ */
+export interface AdminMe {
+  username: string;
+}

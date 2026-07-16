@@ -85,3 +85,53 @@ test.describe("nginx upload size limit (regression: real camera photos)", () => 
     expect(res.status()).toBe(413);
   });
 });
+
+/**
+ * Admin auth through nginx, against the REAL backend (no mocks).
+ *
+ * The point is the proxy path: nginx matches `location /api/` by prefix, so
+ * /api/admin/* should reach the backend like any other route. If it ever didn't,
+ * these would come back as nginx's HTML 404 rather than the app's JSON — a
+ * failure mode no unit or mocked test can see.
+ *
+ * These assert the CONTRACT SHAPE, not a specific auth outcome: the CI stack
+ * runs without ADMIN_* set, so the admin panel is disabled and answers 503,
+ * while a local stack with credentials configured answers 401. Both are correct;
+ * both are JSON from Express with a machine-readable code.
+ */
+test.describe("admin auth API through nginx", () => {
+  test("GET /api/admin/auth/me returns JSON from the app, not an nginx error page", async ({
+    request,
+  }) => {
+    const res = await request.get("/api/admin/auth/me");
+
+    // 401 when admin is configured, 503 when it is not — never a 404, which
+    // would mean nginx never routed it.
+    expect([401, 503]).toContain(res.status());
+    expect(res.headers()["content-type"]).toContain("application/json");
+    const body = await res.json();
+    expect(body.code).toMatch(/^ADMIN_(NOT_AUTHENTICATED|NOT_CONFIGURED)$/);
+  });
+
+  test("POST /api/admin/auth/login is reachable and never leaks which credential was wrong", async ({
+    request,
+  }) => {
+    const res = await request.post("/api/admin/auth/login", {
+      data: { username: "definitely-not-the-admin", password: "definitely-not-the-password" },
+    });
+
+    expect([401, 503]).toContain(res.status());
+    const body = await res.json();
+    // Whatever the outcome, the body must never hint at WHICH field was wrong.
+    expect(JSON.stringify(body)).not.toMatch(/username|password/i);
+  });
+
+  test("POST /api/admin/auth/logout is idempotent with no session", async ({ request }) => {
+    const res = await request.post("/api/admin/auth/logout");
+
+    // 200 {ok:true} when configured; 503 when the panel is off. Never a 401 —
+    // telling someone they cannot log out because they are not logged in is
+    // hostile and pointless.
+    expect([200, 503]).toContain(res.status());
+  });
+});

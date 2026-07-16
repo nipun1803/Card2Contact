@@ -11,7 +11,9 @@ backend/
   src/**/*.test.ts        # legacy co-located unit specs (pre-existing, kept)
   tests/
     unit/                 # service/util/store unit specs (Vitest)
+      admin/              # admin config / service / session store / guard
     integration/          # supertest specs driving the real Express app
+      admin/              # admin auth over HTTP + admin-vs-user isolation
     fixtures/             # override-able factories (contacts, users, sessions, OCR samples)
     mocks/                # fake CardSessionStore / UserStore / SheetsClient / OcrClient
     helpers/              # env defaults (setupFile) + buildTestApp()
@@ -21,6 +23,7 @@ backend/
 frontend/
   tests/
     unit/                 # utils, hooks, reducer, form-mapping, component (Vitest + RTL)
+      admin/              # admin login page, admin guard, useAdminAuth
     integration/          # (reserved)
     e2e/                  # Playwright specs against the running stack
       .auth/user.json     # captured Google login (gitignored; created on demand)
@@ -66,6 +69,13 @@ lifetime bounds; expiry ≠ revocation), the Token Cutover wipe's idempotency, t
 session middleware's single rejection path, the User-Agent parser, the audit
 logger's session-id truncation, the metrics registry, and the rate limiters.
 
+Admin (`tests/unit/admin/`): `resolveAdminConfig`'s boot gate (both-or-neither,
+and a plaintext `ADMIN_PASSWORD_HASH` refusing to start), `AdminAuthService`
+(exact-match username, the constant-work bcrypt compare, session issue/revoke),
+`InMemoryAdminSessionStore` (the 8h Absolute Lifetime, no sliding renewal, and
+that correctness never depends on the purge timer), and the `adminAuth` guard
+(every failure generic, `req.auth` never populated).
+
 **Backend integration** (supertest, real Express app; Mistral/Google SDKs
 mocked): the M1→M4 pipeline over HTTP, status codes and JSON shapes, the
 cross-cutting error conventions (404/409/400/401), the auth router (consent
@@ -75,21 +85,35 @@ Cancel, double-Continue atomicity), a revoked session 401ing on public *and*
 guarded routes while anonymous requests still pass, and the refresh-token
 failure policy (tokens nulled, session survives, `needsReconnect` flips).
 
+Admin (`tests/integration/admin/`): the login/me/logout flow with real signed
+cookies (flags asserted: HttpOnly, SameSite=Strict, Path=/, Max-Age=28800,
+Secure only in production), every credential failure proven byte-identical,
+table-driven input validation, logout idempotency, the unconfigured→503 surface,
+the audit/metrics contract, and — most importantly — `admin-isolation.test.ts`.
+
 **Frontend unit** (Vitest + RTL, jsdom): `format`, `files` (graceful
 downscale fallback), `recentScans` (localStorage read/write/parse-guard),
 `featureFlags`, the `useCardPipeline` state machine (submit/confirm flows,
 session-lost reset, reauth branch), `ContactReviewForm` (the string[]↔
 {value}[] mapping, name-required rule, field-array add/remove, a11y labels),
 the API client's 401 classification (REAUTH_REQUIRED vs SESSION_REVOKED vs
-bare), the route guards' revoked-session redirect + toast, and the Session
-Conflict page.
+bare — plus the admin codes, which must classify as a plain ApiError and never
+as a Session Revocation), the route guards' revoked-session redirect + toast, and
+the Session Conflict page. Admin (`tests/unit/admin/`): the login form
+(show/hide toggle, loading, and a distinct message for each of 401/429/network/
+503), the admin guard's four states, and `useAdminAuth`'s query-key isolation.
 
 **E2E** (Playwright, real Docker stack via nginx :8080): landing → login,
 route guards (protected → /login, unknown → /404), the Google sign-in link
 target, mobile viewport / no-horizontal-scroll, the API contract through nginx
 (pipeline, auth status, 401 gate, upload size limits), the Session Conflict
-page, and the revoked device. Cross-browser: Chrome, Firefox, WebKit/Safari,
-and a mobile viewport.
+page, and the revoked device. Admin (`admin.spec.ts`): the login page renders for
+an anonymous visitor AND for a signed-in Google user (the `PublicOnly` trap), the
+show/hide toggle in a real browser, the login→dashboard→logout journey, and the
+dashboard bouncing both anonymous visitors and non-admin Google users.
+`api-contract.spec.ts` additionally proves nginx proxies `/api/admin/*` to the
+app as JSON rather than an HTML error page. Cross-browser: Chrome, Firefox,
+WebKit/Safari, and a mobile viewport.
 
 > **Before running E2E after a frontend change:** the dev frontend container has
 > no bind mount — it bakes `src/` in at build time. Run
@@ -173,12 +197,70 @@ knowing before adding to it:
   `continueFails` options. As with all authenticated E2E, the OAuth round-trip
   itself is out of scope (Google blocks automation-controlled browsers).
 
+### Admin authentication
+
+- **`tests/integration/admin/admin-isolation.test.ts` is the highest-value admin
+  suite.** Admin and Google auth are two identity systems sharing one app, one
+  cookie parser, and one signing secret; a regression that lets either
+  authenticate the other's routes is a **privilege escalation**, not a bug. It is
+  prevented by three independent choices (distinct cookie name, distinct store,
+  distinct request property), any of which a refactor could quietly undo. Both
+  sessions are minted through the REAL routes — a forged cookie would fail on its
+  signature rather than the check under test, and pass for the wrong reason.
+- **X9 is a regression test for a confirmed bug**, not a hypothetical: because
+  `createSessionMiddleware` is global and rejects revoked sessions on every path,
+  a revoked *Google* session used to 401 the *admin* panel. The `/api/admin`
+  early-return fixes it, and `tests/unit/session-middleware.test.ts` pins both
+  directions — deleting the guard fails, and so does widening it to all of `/api`.
+- **The no-timing-oracle property is asserted STRUCTURALLY**, by spying on
+  `bcrypt.compare`'s call count, never by wall-clock. A timing assertion is flaky
+  under CI load, and a flaky security test gets skipped — which is worse than no
+  test. The refactor it guards against (`if (!usernameOk) return false` before the
+  compare) is functionally identical, faster, and silently reopens user
+  enumeration; the call-count assertion is what makes it loud.
+- **The admin login limiter is 5/15min** (tighter than OAuth's 10 — a password
+  endpoint with a guessable username) and, like every limiter, is disabled under
+  `NODE_ENV=test`; `tests/unit/rate-limit.test.ts` enables it explicitly. That
+  suite also pins the deliberate asymmetry that a 429 audits as
+  `auth_failure{rate_limited}` rather than `admin_auth_failure`, so it reads as a
+  decision rather than a bug.
+- **`tests/helpers/env.ts` deliberately does NOT set `ADMIN_*`.** Admin config is
+  opt-in, so the unconfigured→503 path is what the rest of the suite exercises by
+  default — and a global default would invent a live admin credential across
+  specs that have nothing to do with admin. The admin integration specs set the
+  vars per-file and generate the bcrypt hash at runtime (cost 4, for speed): a
+  committed `$2b$` literal would trip the gitleaks CI job.
+- **A third fake-vs-real convention.** `InMemoryAdminSessionStore` is the
+  PRODUCTION store and is already in-memory with a `_setNow()` seam, so tests
+  inject the real thing rather than a fake. Where `makeSessionStore()` exists
+  because the real predicate runs inside Postgres, there is nothing here worth
+  faking — a fake would only be a second implementation to keep in sync.
+
+## CI: what the audit gate checks
+
+`backend-audit` and `frontend-audit` run `npm audit --omit=dev --audit-level=high`
+— **production dependencies only**, deliberately.
+
+The gate exists to protect the deployed artifact, and the Docker image installs
+exactly that set (`npm ci --omit=dev`). Auditing devDependencies made the job fail
+on advisories that cannot reach production — the vitest UI server (we never run
+`--ui`), vite's dev-server, Windows-only path handling — while telling us nothing
+about what ships.
+
+This is a scoping decision, not a suppression: those advisories are real for a
+developer running a dev server on a hostile network. The only fix is vitest
+2 → 4, which breaks 67 existing tests (`vi.fn()` mock-constructor semantics
+changed, hitting every `vi.mock("google-auth-library")` call site). That upgrade
+is worth doing on its own, and `npm audit` (unscoped) locally is how to see what
+it would address.
+
 ## Coverage snapshot
 
-- **Backend: 290 tests / 24 files.** Uncovered: the DB layer (`db/pool.ts` —
-  exercised only by the live/Docker path). `db/init.ts` is now covered by
-  `init-schema.test.ts`.
-- **Frontend: 62 unit tests / 9 files; 104 E2E across 4 browser projects.**
+- **Backend: 449 tests / 31 files** (346 unit + 103 integration). Uncovered: the
+  DB layer (`db/pool.ts` — exercised only by the live/Docker path). `db/init.ts`
+  is covered by `init-schema.test.ts`.
+- **Frontend: 97 unit tests / 12 files; 144 E2E across 4 browser projects**
+  (admin adds 40 of those: 10 specs x 4 browsers).
   Overall line coverage reads low only because the ~50 pure presentational
   components carry no branching logic and are covered structurally by the E2E
   run rather than unit tests.

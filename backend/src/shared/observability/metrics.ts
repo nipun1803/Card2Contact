@@ -26,7 +26,17 @@ export type MetricName =
   | "sheet_recreated"
   | "reconnect_required"
   | "token_refresh_failure"
-  | "rate_limit_exceeded";
+  | "rate_limit_exceeded"
+  /**
+   * Admin authentication. Deliberately NOT merged into login_success/
+   * login_failure: those feed the Google-login view, and folding an operator
+   * login into them would corrupt both readings.
+   *
+   * A rate-limited admin login needs no name here — it counts as
+   * rate_limit_exceeded{endpoint=admin_login} via the shared limiter.
+   */
+  | "admin_login_success"
+  | "admin_login_failure";
 
 export type MetricLabels = Record<string, string>;
 

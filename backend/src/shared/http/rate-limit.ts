@@ -110,3 +110,26 @@ export function createUploadLimiter(deps: LimiterDeps): RequestHandler {
 export function createSaveLimiter(deps: LimiterDeps): RequestHandler {
   return makeLimiter({ endpoint: "save", limit: 60, byUser: true }, deps);
 }
+
+/**
+ * Guards the admin login against password brute force.
+ *
+ * 5 per 15 min — tighter than OAuth's 10 deliberately: this is a password
+ * endpoint with a single, guessable username, where the OAuth route is only a
+ * redirect and Google does its own throttling behind it. Combined with bcrypt
+ * cost 12 (~100ms/attempt), this is the primary control against an anonymous
+ * guesser, not defence in depth.
+ *
+ * Keyed on the IP (not byUser): there is no req.auth on a login attempt, and
+ * keying on the submitted username would let an attacker reset their own budget
+ * by varying it.
+ *
+ * Note the shared handler audits a 429 as `auth_failure{reason:"rate_limited"}`
+ * rather than `admin_auth_failure` — the endpoint label on the
+ * rate_limit_exceeded metric is what identifies it as the admin route. Left
+ * as-is on purpose: parameterizing makeLimiter's event name would touch four
+ * working call sites to serve one caller.
+ */
+export function createAdminLoginLimiter(deps: LimiterDeps): RequestHandler {
+  return makeLimiter({ endpoint: "admin_login", limit: 5 }, deps);
+}

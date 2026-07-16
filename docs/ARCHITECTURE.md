@@ -19,6 +19,7 @@ card2contact/
 │                          #   image-acquisition (M1), text-recognition (M2),
 │                          #   contact-extraction (M3), contact-review (M4),
 │                          #   google-sheets (M5) + google-auth (login)
+│                          #   + admin-auth (operator login, Phase 0.1)
 ├── frontend/              # React + TypeScript, API-driven, no business logic
 └── (postgres via docker-compose — multi-user persistence)
 ```
@@ -57,7 +58,13 @@ flowchart LR
   M5 -. uses .-> US[UserStore]
   GA -. uses .-> US
   SP -. implemented in .-> AppTs[app.ts composition root]
+  ADM[admin-auth Operator login] -. guards .-> ADMR["/api/admin/* (future routes)"]
+  ADM -. uses .-> ASS[AdminSessionStore in-memory]
 ```
+
+admin-auth shares nothing with the pipeline or google-auth: no store, no cookie,
+no request property. That isolation is a security guarantee (#13), not a
+coincidence of layout.
 
 Pipeline modules (M1–M5) depend only on the previous stage's output via
 `CardSessionStore`; M5 and google-auth additionally depend on the shared
@@ -135,6 +142,28 @@ device would sit on a stale dashboard until it happened to try a save.
 Note **expiry is not revocation**: an expired session degrades to anonymous
 (normal `/login`), while a revoked one gets the explicit message.
 
+**Body-parser rejections** are handled centrally too, and apply to every route
+that accepts a JSON body: an oversized body is **413** (`Request body is too
+large`) and malformed JSON is **400** (`Request body is not valid JSON`).
+`express.json()` already computes the right status — the handler honours it
+rather than letting these fall through to the generic 500, which used to report a
+client's own oversized request as "Internal server error" and send them hunting
+for a server bug that was never there. The messages are deliberately generic:
+body-parser's own text echoes the configured limit and parse offsets, which a
+client neither needs nor should be handed.
+
+**Admin authentication** adds three, in `shared/http/admin-errors.ts` rather than
+`pipeline-errors.ts` (which is documented as shared by all module routers — these
+serve one module):
+
+- `AdminInvalidCredentialsError` -> **401** `{code:"ADMIN_INVALID_CREDENTIALS"}`. Deliberately generic and byte-identical for a wrong username, a wrong password, or both — a distinguishable response is a user-enumeration oracle.
+- `AdminNotAuthenticatedError` -> **401** `{code:"ADMIN_NOT_AUTHENTICATED"}`. Covers absent/unknown/expired/revoked alike; admin has no Session Replacement story to explain, so there is no equivalent of `SESSION_REVOKED`.
+- `AdminNotConfiguredError` -> **503** `{code:"ADMIN_NOT_CONFIGURED"}`. The app's only non-4xx/500 domain error, and correct: with `ADMIN_*` unset no credential *could* succeed, so this is server state, not client fault. A 401 would invite the operator to retype a correct password forever.
+
+All three codes are distinct from `REAUTH_REQUIRED`/`SESSION_REVOKED`, so the
+frontend can never mistake an admin 401 for a Google Session Revocation and
+bounce an operator to the user login page.
+
 ## Terminology
 
 Use these terms and no synonyms — in identifiers, audit events, comments, and UI
@@ -154,6 +183,8 @@ searchable.
 | **Recreate Sheet** | Abandon an unusable spreadsheet and provision a fresh one, persisting id/url/title. | "restore", "regenerate" |
 | **Reconnect** | The user re-granting Google access via OAuth after tokens were nulled. Always about *tokens*. | "re-auth", "relink" |
 | **Token Cutover** | The one-time migration from plaintext to AES-encrypted tokens at rest. | "the wipe" |
+| **Admin** | The single operator identified by `ADMIN_USERNAME`. Never a product user; has no Google account in this role. | "superuser", "root", "staff", "moderator" |
+| **Admin Session** | An operator's authenticated session: in-memory, 8h Absolute Lifetime, `admin_session` cookie. Distinct from an Active Session in every respect. | "admin token", "admin login token" |
 
 **M5 vs google-sheets:** "M5" is the *requirement* id (used in `docs/`);
 `google-sheets` is the *module* id (used in code paths). Both are correct in
@@ -192,6 +223,59 @@ Conflict; continuing revokes the first.
 - **The revoked device finds out** via React Query's `refetchOnWindowFocus` on
   the auth query — no polling, no websockets.
 
+## Admin authentication
+
+A second, entirely independent identity system (Phase 0.1). Full design in
+[docs/modules/admin/Admin-Authentication.md](modules/admin/Admin-Authentication.md),
+including the threat model; the cross-cutting decisions are here.
+
+- **Env, not a table.** One operator, so `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH`
+  in `.env` beats a single-row identity table with a migration and a store. The
+  password exists at rest only as a bcrypt hash — a database disclosure has
+  nothing admin-shaped to leak.
+- **Opt-in, and loud when half-done.** Both vars absent = the panel is off and
+  its routes answer 503; every deployment predating this feature boots unchanged
+  and the whole test suite runs on that path. Exactly one var set, or a hash that
+  isn't bcrypt-shaped, is a **boot error**. Absent is quiet and safe; present is
+  strictly validated. (`SESSION_SECRET` cannot have an off-switch; this can.)
+- **In-memory sessions, and a deploy signs the admin out.** Accepted, and
+  load-bearing: with no revoke endpoint in 0.1, **the restart IS the revocation
+  mechanism.** The `AdminSessionStore` interface keeps this reversible — a
+  Postgres implementation is a new class plus one wiring line in `index.ts`.
+- **8h Absolute Lifetime, no idle bound, no sliding renewal.** Deliberately
+  unlike the user session (7d/30d). An operator session is bounded by a work
+  session; a sliding window would keep a stolen cookie alive as long as the thief
+  kept using it. The cookie's `maxAge` derives from the same constant so the two
+  cannot drift.
+- **`sameSite:"strict"`, not `"lax"`.** The user cookie's `lax` is required
+  *only* because it is set during the cross-site redirect back from
+  accounts.google.com. Admin login is a same-site fetch POST, so `strict` is free
+  and strictly stronger — it closes CSRF for admin routes outright, rather than
+  relying on the app's documented lax-only posture. **Do not unify the two
+  policies**: widening `lax` to admin weakens it; narrowing the user cookie to
+  `strict` breaks the OAuth landing.
+- **`req.adminAuth`, never `req.auth`.** `requireAuth` gates on `req.auth` being
+  truthy and `createSaveLimiter`'s keyGenerator reads `req.auth?.googleUserId` —
+  an admin populating it would authenticate `POST /api/contacts/save` as a user.
+  This is a privilege escalation, and the distinct property is what prevents it.
+- **One `cookieParser`, one secret.** A second secret would need
+  `cookieParser(["a","b"])`, which makes both secrets valid for both cookies —
+  actively removing the distinction it appears to add. Isolation lives in the
+  cookie name and the store lookup: a signature only proves *we* minted the
+  value; the value still has to name a live session in the right store.
+- **`createSessionMiddleware` skips `/api/admin` entirely.** This one is easy to
+  read as tidiness and is not. The middleware is global and rejects any request
+  whose cookie names a revoked session, whatever the path — so without the guard,
+  an operator whose *Google* session was replaced on another device is locked out
+  of the *admin* panel and told "you signed in on another device", which is true
+  and completely irrelevant to the route they asked for. (Confirmed by
+  reproduction before the fix.) The invariant that `SessionRevokedError` is
+  raised by the middleware rather than `requireAuth` is untouched: every
+  non-admin path behaves exactly as before, which is what the `/status`
+  revocation flow depends on. Both directions are pinned in
+  `tests/unit/session-middleware.test.ts` — deleting the guard fails it, and so
+  does widening it to all of `/api`.
+
 ## Sheet recovery
 
 A **trashed** spreadsheet reads and writes normally through the Sheets API and
@@ -227,6 +311,7 @@ not a debugging dump.**
 | `sessionId`, **truncated to 8 chars** | Keeps all the correlation value, destroys the credential value. Truncation happens at the *sink*, so no call site can leak a full id by mistake |
 | `device` / `browser` | Coarse strings from our own parser — not the raw UA |
 | `ip` | The core signal for "was this sign-in from somewhere unexpected?" |
+| `adminUsername` | The operator's configured (or attempted) login name. Logged despite the `email` ban because that ban's two reasons both fail here: it is **operator-chosen**, set by whoever writes `.env` — i.e. the person reading this log — not a data subject's PII; and there is **no opaque alternative** to join on, since no `admins` table exists, so omitting it would leave `admin_auth_failure` with no subject and fail the log's own purpose. A username without a password is not a capability |
 
 | Never logged | Why |
 |---|---|
@@ -235,6 +320,7 @@ not a debugging dump.**
 | Contact data | Our users' *customers'* PII. `contact_save` logs `cardId` only |
 | Raw User-Agent | Fingerprinting vector, attacker-controlled |
 | `spreadsheetId` | Capability-ish; the event plus the user is enough |
+| The admin password / `ADMIN_PASSWORD_HASH` | In any form, in any field. The hash is not a password, but it is offline-crackable — and a log that records the *outcome* of a credential check has no business carrying the credential. Enforced by test (`tests/integration/admin/admin-auth.test.ts`) |
 
 ## Security Guarantees
 
@@ -253,6 +339,11 @@ What this system can honestly claim — and, just as importantly, what it cannot
 | 9 | Contacts are never written to a trashed or deleted spreadsheet | Drive `trashed` check before every save; Recreate Sheet |
 | 10 | Abuse of expensive endpoints is bounded | Per-endpoint rate limits (OAuth 10, session 20, upload 30, save 60 per 15 min) |
 | 11 | All production traffic is TLS-terminated with HSTS | `nginx.prod.conf` |
+| 12 | The admin password is never at rest in plaintext | bcrypt hash only, in `.env`; the shape is validated at boot, so a plaintext value cannot start the server |
+| 13 | Admin and user sessions cannot authenticate each other's routes | Separate cookie name, separate store, separate request property (`req.adminAuth` vs `req.auth`); pinned by `tests/integration/admin/admin-isolation.test.ts` |
+| 14 | Admin login reveals nothing about which credential was wrong | Byte-identical generic 401 for every credential failure, plus a constant-work bcrypt compare against a dummy hash on a username miss |
+| 15 | Admin login brute force is bounded | 5 attempts / 15 min / IP, plus bcrypt cost 12 (~100ms per attempt) |
+| 16 | No Admin Session outlives 8h, however active | Absolute Lifetime enforced in `findActive` on every lookup; no idle bound, no sliding renewal |
 
 **Explicitly NOT guaranteed** — stated so nobody assumes otherwise:
 
@@ -265,6 +356,16 @@ What this system can honestly claim — and, just as importantly, what it cannot
   it is one mechanism, not defence in depth.
 - **Audit logs are not tamper-evident.** Anyone who can write the log stream can
   forge entries. Fine for operational forensics; not legal evidence.
+- **Admin Sessions do not survive a restart.** By design (in-memory) — and it is
+  the revocation mechanism, not merely a limitation.
+- **A stolen admin cookie is valid until it expires.** There is no admin
+  revoke endpoint in Phase 0.1; the 8h Absolute Lifetime bounds the window, and a
+  redeploy ends every Admin Session immediately.
+- **There is exactly one admin, and no MFA.** The audit log records the
+  configured username, which says nothing about *which human* used the
+  credential.
+- **No admin account lockout.** Rate limiting only: locking the single shared
+  admin credential would be a self-inflicted denial of service.
 - **Rate limits are per-container and in-memory.** They reset on restart and do
   not hold across replicas. Bounds accidental abuse and casual attacks, not a
   determined distributed one.
@@ -312,6 +413,17 @@ Do **not** restore `users-pre-cutover.sql` wholesale — it would revert
 **Any move across this change — forward or back — signs everyone out once**
 (the cookie's meaning changed from a user id to a session id). Expected, not a bug.
 
+**Admin authentication is fully reversible and touches no data.** There is no
+DDL, no table, and no migration — nothing to roll back. To disable the panel,
+unset both `ADMIN_*` vars and redeploy: the routes answer 503 and no user-facing
+behaviour changes. To rotate the password, generate a new hash, replace the var,
+and redeploy.
+
+Note the redeploy is not incidental: **restarting the backend ends every Admin
+Session** (they are in-memory), which is precisely how you evict a
+suspected-stolen admin cookie — there is no admin revoke endpoint in Phase 0.1.
+Rolling back to a pre-admin image is safe: the `ADMIN_*` vars are simply ignored.
+
 **If a Session Replacement bug locks users out**, clear recent revocations
 without a redeploy:
 
@@ -337,6 +449,8 @@ hardcoded or committed:
 | `GOOGLE_OAUTH_CLIENT_ID` | M5 | OAuth Web Client ID (Google Cloud Console → Credentials) |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | M5 | OAuth Web Client secret |
 | `GOOGLE_OAUTH_REDIRECT_URI` | M5 | Must exactly match a redirect URI registered on the OAuth client |
+| `ADMIN_USERNAME` | admin-auth | The single operator's login name. **Both or neither** with the hash — setting only one is a boot error naming the other |
+| `ADMIN_PASSWORD_HASH` | admin-auth | bcrypt hash, **never plaintext** — the shape is validated at boot and a non-hash refuses to start (bcrypt would compare it to `false` forever, locking the admin out silently). Both blank = the admin panel is disabled and `/api/admin/*` answers 503. Generate: `node -e "console.log(require('bcrypt').hashSync(process.argv[1],12))" 'your-password'` |
 | `PORT` | app entrypoint | Backend HTTP port (defaults to 4000) |
 
 `GOOGLE_SHEETS_SPREADSHEET_ID` is **removed** — each user's spreadsheet is

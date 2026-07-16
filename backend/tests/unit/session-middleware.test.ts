@@ -32,9 +32,10 @@ const CHROME_MAC =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /** A request carrying the given signed session cookie (or none). */
-function makeReq(sessionId?: string): Request {
+function makeReq(sessionId?: string, path = "/api/cards"): Request {
   return {
     signedCookies: sessionId ? { [COOKIE_NAME]: sessionId } : {},
+    path,
     ip: "203.0.113.4",
     get: (name: string) => (name.toLowerCase() === "user-agent" ? CHROME_MAC : undefined),
   } as unknown as Request;
@@ -371,5 +372,120 @@ describe("createRequireAuth", () => {
       expect.objectContaining({ reason: "not_authenticated", device: "macOS" }),
     ]);
     expect(metrics.get("auth_failure", { reason: "not_authenticated" })).toBe(1);
+  });
+});
+
+/**
+ * The X9 guard. This middleware is GLOBAL, so before the early-return existed a
+ * request to /api/admin/* carrying a revoked c2c_session cookie was rejected
+ * with SESSION_REVOKED — locking an operator out of the admin panel because
+ * their unrelated *Google* session had been replaced on another device, with an
+ * error message that makes no sense in that context.
+ *
+ * Both directions are pinned: admin paths skip, and every other path must still
+ * reject exactly as before. Deleting the guard fails the first block; widening
+ * it (e.g. to all of /api) fails the second.
+ */
+describe("createSessionMiddleware — /api/admin is outside the user session model", () => {
+  it("skips a revoked session on an admin path instead of rejecting it", async () => {
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+    await h.sessions.revoke(session.id, "replaced_by_new_login");
+
+    const req = makeReq(session.id, "/api/admin/auth/me");
+    const { next } = await h.run(req);
+
+    // next() with no error — the admin router decides, not this middleware.
+    expect(next).toHaveBeenCalledWith();
+    expect(req.auth).toBeUndefined();
+  });
+
+  it("does not resolve req.auth on an admin path even for a VALID user session", async () => {
+    // An operator signed into both must not arrive at an admin route carrying a
+    // user identity: requireAuth and createSaveLimiter both read req.auth.
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+
+    const req = makeReq(session.id, "/api/admin/auth/me");
+    const { next } = await h.run(req);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(req.auth).toBeUndefined();
+  });
+
+  it("does not touch the session store at all for an admin path", async () => {
+    const h = harness();
+
+    await h.run(makeReq("some-id", "/api/admin/anything"));
+
+    expect(h.sessions.findActive).not.toHaveBeenCalled();
+    expect(h.sessions.isRevoked).not.toHaveBeenCalled();
+  });
+
+  it("skips every /api/admin/* path, including future ones", async () => {
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+    await h.sessions.revoke(session.id, "replaced_by_new_login");
+
+    for (const path of ["/api/admin", "/api/admin/auth/login", "/api/admin/users/42"]) {
+      const { next } = await h.run(makeReq(session.id, path));
+      expect(next).toHaveBeenCalledWith();
+    }
+  });
+
+  // The other direction: the guard must not have widened the skip.
+  it("STILL rejects a revoked session on a non-admin path", async () => {
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+    await h.sessions.revoke(session.id, "replaced_by_new_login");
+
+    const { next } = await h.run(makeReq(session.id, "/api/auth/google/status"));
+
+    expect(next).toHaveBeenCalledWith(expect.any(SessionRevokedError));
+  });
+
+  it("STILL resolves req.auth on a normal path", async () => {
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+
+    const req = makeReq(session.id, "/api/contacts/save");
+    await h.run(req);
+
+    expect(req.auth).toMatchObject({ googleUserId: "u1" });
+  });
+
+  it("does not skip a path that merely mentions admin elsewhere", async () => {
+    // startsWith, not includes — /api/cards/admin-notes is a user route.
+    const h = harness();
+    const session = await h.sessions.create("u1", {
+      device: "macOS",
+      browser: "Chrome",
+      ip: "203.0.113.4",
+    });
+    await h.sessions.revoke(session.id, "replaced_by_new_login");
+
+    const { next } = await h.run(makeReq(session.id, "/api/cards/admin-notes"));
+
+    expect(next).toHaveBeenCalledWith(expect.any(SessionRevokedError));
   });
 });

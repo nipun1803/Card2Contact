@@ -4,6 +4,7 @@ import { UserStore } from "../../src/shared/store/user-store";
 import { SessionStore } from "../../src/shared/store/session-store";
 import { AuditLogger } from "../../src/shared/audit/audit-logger";
 import { Metrics } from "../../src/shared/observability/metrics";
+import { AdminSessionStore } from "../../src/shared/store/admin-session-store";
 import { makeSessionStore, makeUserStore } from "../mocks/stores";
 
 /**
@@ -31,6 +32,16 @@ export interface TestAppDeps {
   sessionStore?: SessionStore;
   audit?: AuditLogger;
   metrics?: Metrics;
+  /**
+   * Admin Sessions. Pass an InMemoryAdminSessionStore (the real one — it is
+   * already in-memory, so there is nothing worth faking) when a spec needs to
+   * age an admin session via _setNow(). Omit it and createApp builds its own.
+   *
+   * Note admin routes only exist when ADMIN_USERNAME/ADMIN_PASSWORD_HASH are
+   * set; tests/helpers/env.ts deliberately does NOT set them, so by default
+   * every spec sees the unconfigured (503) admin surface.
+   */
+  adminSessionStore?: AdminSessionStore;
 }
 
 export function buildTestApp(deps: TestAppDeps = {}): Express {
@@ -39,5 +50,6 @@ export function buildTestApp(deps: TestAppDeps = {}): Express {
     sessionStore: deps.sessionStore ?? makeSessionStore(),
     audit: deps.audit ?? { log: () => {} },
     metrics: deps.metrics ?? { inc: () => {} },
+    ...(deps.adminSessionStore ? { adminSessionStore: deps.adminSessionStore } : {}),
   });
 }

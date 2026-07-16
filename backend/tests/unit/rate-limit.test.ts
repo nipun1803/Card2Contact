@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { Express } from "express";
 import request from "supertest";
 import {
+  createAdminLoginLimiter,
   createOAuthLimiter,
   createSaveLimiter,
   createUploadLimiter,
@@ -184,5 +185,67 @@ describe("saveLimiter (60 per 15 min per USER)", () => {
     expect(output).not.toMatch(/ERR_ERL_KEY_GEN_IPV6|ipKeyGenerator/);
     warn.mockRestore();
     error.mockRestore();
+  });
+});
+
+/**
+ * The admin login limiter. Tighter than the rest (5 vs OAuth's 10) because it
+ * guards a password endpoint with a single, guessable username — where the OAuth
+ * route is only a redirect with Google's own throttling behind it.
+ *
+ * Together with bcrypt cost 12 (~100ms/attempt) this is the PRIMARY control
+ * against an anonymous guesser, not defence in depth: 5 attempts per 15 minutes
+ * makes an online brute force useless.
+ */
+describe("adminLoginLimiter (5 per 15 min, per IP)", () => {
+  it("allows 5 attempts and blocks the 6th", async () => {
+    const h = harness(createAdminLoginLimiter);
+
+    for (let i = 0; i < 5; i++) {
+      expect((await request(h.app).get("/x")).status).toBe(200);
+    }
+
+    expect((await request(h.app).get("/x")).status).toBe(429);
+  });
+
+  it("returns the app's standard error shape on a 429", async () => {
+    const h = harness(createAdminLoginLimiter);
+    for (let i = 0; i < 5; i++) await request(h.app).get("/x");
+
+    const res = await request(h.app).get("/x");
+
+    expect(res.body).toEqual({ error: "Too many requests — please try again later" });
+  });
+
+  it("counts the block against the admin_login endpoint label", async () => {
+    const h = harness(createAdminLoginLimiter);
+    for (let i = 0; i < 6; i++) await request(h.app).get("/x");
+
+    expect(h.metrics.get("rate_limit_exceeded", { endpoint: "admin_login" })).toBe(1);
+  });
+
+  /**
+   * The documented asymmetry: a 429 audits as auth_failure{rate_limited}, NOT
+   * admin_auth_failure, because the shared makeLimiter handler emits it and is
+   * deliberately not parameterized for one caller. Pinned here so it reads as a
+   * decision rather than a bug — the endpoint label above is what identifies it.
+   */
+  it("audits a rate-limited admin login as auth_failure{rate_limited}", async () => {
+    const h = harness(createAdminLoginLimiter);
+    for (let i = 0; i < 6; i++) await request(h.app).get("/x");
+
+    expect(h.audit.ofType("auth_failure")).toEqual([
+      expect.objectContaining({ reason: "rate_limited" }),
+    ]);
+    expect(h.audit.ofType("admin_auth_failure")).toHaveLength(0);
+  });
+
+  it("is disabled under NODE_ENV=test like every other limiter", async () => {
+    process.env.NODE_ENV = "test";
+    const h = harness(createAdminLoginLimiter);
+
+    for (let i = 0; i < 20; i++) {
+      expect((await request(h.app).get("/x")).status).toBe(200);
+    }
   });
 });

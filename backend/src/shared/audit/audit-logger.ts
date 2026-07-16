@@ -27,13 +27,48 @@ export type AuditEvent =
   | "session_conflict"
   | "session_conflict_cancelled"
   | "sheet_recreated"
-  | "token_refresh_failed";
+  | "token_refresh_failed"
+  /**
+   * Admin authentication (see docs/modules/admin/Admin-Authentication.md).
+   * Deliberately distinct from `login`/`logout`/`auth_failure`: those carry a
+   * googleUserId and mean "an end user's Google session", a different subject
+   * entirely. Separate names keep `docker logs | grep admin_auth_failure`
+   * honest — the most likely operational query for the admin panel.
+   *
+   * Exception, deliberate: a rate-limited admin login emits
+   * `auth_failure{reason:"rate_limited"}` from the shared limiter handler
+   * (shared/http/rate-limit.ts), not `admin_auth_failure`. The
+   * `rate_limit_exceeded{endpoint:"admin_login"}` metric is what identifies it.
+   */
+  | "admin_login"
+  | "admin_logout"
+  | "admin_auth_failure";
 
 export interface AuditEntry {
   event: AuditEvent;
   /** Google's opaque `sub`. Null when the request was never identified. */
   googleUserId?: string | null;
-  /** Truncated to 8 chars by the sink — pass the full id. */
+  /**
+   * The admin's configured username (ADMIN_USERNAME), or the *attempted* one on
+   * a failure. Null when not an admin event.
+   *
+   * Logged despite the field policy forbidding `email`, because the policy's
+   * two reasons for that ban both fail here: (1) `email` is an end user's PII —
+   * this is an operator-chosen role credential, set by whoever writes `.env`,
+   * i.e. the same person reading this log; (2) `email` is redundant given
+   * googleUserId — here there is no opaque alternative, since no `admins` table
+   * exists to join on, so omitting it would leave admin_auth_failure with no
+   * subject at all and fail the log's stated purpose ("who did what").
+   *
+   * A username is not a capability — unlike tokens and session ids, which is
+   * why those are excluded/truncated. The admin *password* is never logged in
+   * any form, in any field.
+   */
+  adminUsername?: string | null;
+  /**
+   * The session this request authenticated with — user (`c2c_session`) or admin
+   * (`admin_session`). Truncated to 8 chars by the sink — pass the full id.
+   */
   sessionId?: string | null;
   device?: string | null;
   browser?: string | null;

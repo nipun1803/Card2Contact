@@ -4,6 +4,8 @@ import {
   NetworkError,
   ReauthError,
   SessionRevokedError,
+  adminLogin,
+  getAdminMe,
   getAuthStatus,
 } from "@/shared/services/api";
 
@@ -108,5 +110,65 @@ describe("other failures", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(429);
     expect(err.message).toMatch(/too many requests/i);
+  });
+});
+
+/**
+ * The frontend half of the admin/user isolation guarantee.
+ *
+ * Both identity systems return 401s, and `request()` classifies them by `code`.
+ * If an admin 401 were ever mistaken for SESSION_REVOKED, the app would toast
+ * "you signed in on another device" and bounce the operator to the USER login
+ * page — for a failure in a system the Google session knows nothing about.
+ *
+ * The admin codes are deliberately distinct and deliberately unhandled: they
+ * fall through to a plain ApiError carrying the status, which is exactly what
+ * useAdminAuth and AdminLogin classify on.
+ */
+describe("admin 401s never masquerade as Google-session errors", () => {
+  it("classifies ADMIN_INVALID_CREDENTIALS as a plain ApiError, not Reauth/SessionRevoked", async () => {
+    mockFetch(401, { error: "Invalid credentials", code: "ADMIN_INVALID_CREDENTIALS" });
+
+    const err = await adminLogin("admin", "wrong").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).not.toBeInstanceOf(ReauthError);
+    expect(err).not.toBeInstanceOf(SessionRevokedError);
+    expect((err as ApiError).status).toBe(401);
+    expect((err as ApiError).message).toBe("Invalid credentials");
+  });
+
+  it("classifies ADMIN_NOT_AUTHENTICATED as a plain ApiError", async () => {
+    mockFetch(401, { error: "Admin login required", code: "ADMIN_NOT_AUTHENTICATED" });
+
+    const err = await getAdminMe().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).not.toBeInstanceOf(SessionRevokedError);
+  });
+
+  it("surfaces ADMIN_NOT_CONFIGURED as a 503 ApiError", async () => {
+    mockFetch(503, { error: "Admin access is not configured", code: "ADMIN_NOT_CONFIGURED" });
+
+    const err = await getAdminMe().catch((e: unknown) => e);
+
+    expect((err as ApiError).status).toBe(503);
+  });
+
+  it("surfaces a rate-limited admin login as a 429 ApiError", async () => {
+    // AdminLogin keys its "wait a few minutes" message off the status.
+    mockFetch(429, { error: "Too many requests — please try again later" });
+
+    const err = await adminLogin("admin", "pw").catch((e: unknown) => e);
+
+    expect((err as ApiError).status).toBe(429);
+  });
+
+  it("surfaces an unreachable server as NetworkError, not a credential failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+
+    const err = await adminLogin("admin", "pw").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(NetworkError);
   });
 });

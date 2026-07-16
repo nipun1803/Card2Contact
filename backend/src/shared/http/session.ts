@@ -41,7 +41,13 @@ export const PENDING_COOKIE_NAME = "c2c_pending";
 const isProd = () => process.env.NODE_ENV === "production";
 
 /**
- * Cookie policy, shared by both cookies.
+ * Cookie policy, shared by both USER cookies (c2c_session, c2c_pending).
+ *
+ * The admin cookie deliberately does NOT use this — it has its own policy in
+ * shared/http/admin-session.ts with sameSite "strict", because the "lax"
+ * requirement below is specific to the Google OAuth redirect and does not apply
+ * to a same-site login POST. Do not unify the two: widening this to admin, or
+ * flipping this to "strict" for consistency, breaks the OAuth landing.
  *
  * sameSite "lax" is REQUIRED, not incidental: the session cookie is set during
  * the GET redirect back from accounts.google.com, which is a cross-site
@@ -150,6 +156,30 @@ export function createSessionMiddleware(
 ): RequestHandler {
   return async (req, res, next) => {
     try {
+      /**
+       * Admin routes are not part of the user session model — skip entirely.
+       *
+       * This is load-bearing, not tidiness. This middleware is GLOBAL, and the
+       * rejection below fires for any request whose cookie names a revoked
+       * session — regardless of path. Without this guard, an operator whose
+       * *Google* session was replaced on another device would get
+       * 401 SESSION_REVOKED from the *admin* panel: an unrelated identity
+       * system's failure, with a message ("you signed in on another device")
+       * that makes no sense there. Verified: it reproduces without this line.
+       *
+       * The invariant in CLAUDE.md — "SessionRevokedError is raised by the
+       * session middleware, not requireAuth" — is untouched. Every non-admin
+       * path still gets the exact same treatment, which is what the /status
+       * revocation flow depends on. Admin routes simply have no user session to
+       * resolve: they authenticate via `admin_session` in createAdminAuth, and
+       * `req.auth` must stay unset there anyway (see shared/http/admin-session.ts).
+       *
+       * Preferred over mounting the admin router before this middleware: that
+       * would also put it before cookieParser, breaking its signed-cookie read.
+       * It also saves admin routes a sessionStore lookup they never use.
+       */
+      if (req.path.startsWith("/api/admin")) return next();
+
       const sessionId = readSignedCookie(req, COOKIE_NAME);
       if (!sessionId) return next(); // anonymous: the common case for M1–M4
 

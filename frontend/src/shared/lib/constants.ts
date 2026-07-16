@@ -9,6 +9,11 @@ export const ROUTES = {
   /** Session Conflict prompt — the OAuth callback redirects here when the user
    *  already has an Active Session on another device. */
   sessionConflict: "/session-conflict",
+  /** Operator routes. Deliberately outside the Google-session guards — an admin
+   *  is a different identity entirely, and may or may not also be a signed-in
+   *  user. See src/app/router.tsx and docs/modules/admin/. */
+  adminLogin: "/admin/login",
+  adminDashboard: "/admin/dashboard",
 } as const;
 
 /** Default title of the auto-provisioned spreadsheet (backend constant). */

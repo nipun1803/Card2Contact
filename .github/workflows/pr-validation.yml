@@ -224,7 +224,13 @@ jobs:
       - name: Start docker compose stack
         run: docker compose up -d --build
         env:
-          SESSION_SECRET: ci-test-session-secret
+          # Throwaway values, but the backend validates both at boot and exits
+          # otherwise: SESSION_SECRET must be >= 32 chars, and
+          # TOKEN_ENCRYPTION_KEY must be exactly 64 hex chars (32 bytes).
+          # Not a secret — CI signs in against a mocked Google and stores no
+          # real tokens.
+          SESSION_SECRET: ci-test-session-secret-at-least-32-chars
+          TOKEN_ENCRYPTION_KEY: "00000000000000000000000000000000000000000000000000000000000000ff"
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY_CI }}
           GOOGLE_OAUTH_CLIENT_ID: ci-test-client-id
           GOOGLE_OAUTH_CLIENT_SECRET: ci-test-client-secret

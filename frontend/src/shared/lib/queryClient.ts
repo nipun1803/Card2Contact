@@ -34,4 +34,10 @@ export const queryClient = new QueryClient({
 /** Query keys, centralized to avoid typos across invalidations. */
 export const queryKeys = {
   auth: ["auth"] as const,
+  /**
+   * Admin auth status — deliberately a separate key from `auth`. Sharing one
+   * would make an admin login invalidate the Google session query (and vice
+   * versa): two unrelated identities refetching each other for no reason.
+   */
+  adminAuth: ["admin-auth"] as const,
 };

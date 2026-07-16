@@ -29,6 +29,12 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      # Admin Authentication — OPTIONAL, both or neither. Left unset the admin
+      # panel is disabled and /api/admin/* answers 503. The `:-` defaults matter:
+      # this file enumerates env vars explicitly (no env_file), so without them
+      # the container would never see the config even when .env sets it.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
     ports:
       - "${BACKEND_PORT:-4000}:4000"
     depends_on:

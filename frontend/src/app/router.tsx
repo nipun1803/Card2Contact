@@ -3,6 +3,7 @@ import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppLayout } from "@/layouts/AppLayout";
 import { PublicLayout } from "@/layouts/PublicLayout";
 import { ProtectedRoute, PublicOnly } from "@/routes/guards";
+import { AdminProtectedRoute } from "@/routes/admin/guards";
 import { AppSplash } from "@/shared/components/common/AppSplash";
 import { ROUTES } from "@/shared/lib/constants";
 
@@ -14,6 +15,8 @@ const ScanApp = lazy(() => import("@/routes/ScanApp"));
 const Profile = lazy(() => import("@/routes/Profile"));
 const SessionConflict = lazy(() => import("@/routes/SessionConflict"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
+const AdminLogin = lazy(() => import("@/routes/admin/AdminLogin"));
+const AdminDashboard = lazy(() => import("@/routes/admin/AdminDashboard"));
 
 /** Suspense boundary used while a lazy page chunk loads. */
 function Lazy({ children }: { children: React.ReactNode }) {
@@ -57,6 +60,26 @@ export const router = createBrowserRouter([
     element: <PublicLayout />,
     children: [
       { path: ROUTES.sessionConflict, element: <Lazy><SessionConflict /></Lazy> },
+    ],
+  },
+  /**
+   * Admin — a separate identity system, so deliberately outside BOTH Google
+   * guards, and with no AppLayout/PublicLayout chrome.
+   *
+   * /admin/login must NOT sit under PublicOnly: that guard bounces anyone with a
+   * Google session to /dashboard, so an operator who also happens to be signed
+   * in as a user could never reach the admin login at all. It must not sit under
+   * ProtectedRoute either — an admin need not be a Google user, and would be
+   * bounced to /login.
+   *
+   * /admin/dashboard is gated by AdminProtectedRoute, which reads the Admin
+   * Session (useAdminAuth) and never touches useAuth.
+   */
+  { path: ROUTES.adminLogin, element: <Lazy><AdminLogin /></Lazy> },
+  {
+    element: <AdminProtectedRoute />,
+    children: [
+      { path: ROUTES.adminDashboard, element: <Lazy><AdminDashboard /></Lazy> },
     ],
   },
   { path: "/404", element: <Lazy><NotFound /></Lazy> },

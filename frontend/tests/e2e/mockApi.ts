@@ -24,6 +24,18 @@ export interface MockOptions {
   sessionRevoked?: boolean;
   /** Make POST /session/continue fail, as an expired Pending Session would. */
   continueFails?: boolean;
+
+  /**
+   * Admin authentication — a SEPARATE identity from `authenticated` above.
+   *
+   * Defaults to false so every existing spec is unaffected: a Google-signed-in
+   * user is not an admin, which is exactly the isolation the app guarantees.
+   */
+  adminAuthenticated?: boolean;
+  /** Reject POST /admin/auth/login with the generic 401. */
+  adminLoginFails?: boolean;
+  /** Answer every admin route 503, as an unconfigured server does. */
+  adminNotConfigured?: boolean;
 }
 
 const json = (route: Route, status: number, body: unknown) =>
@@ -37,7 +49,57 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     saveReauthRequired = false,
     sessionRevoked = false,
     continueFails = false,
+    adminAuthenticated = false,
+    adminLoginFails = false,
+    adminNotConfigured = false,
   } = opts;
+
+  /**
+   * Admin routes, mounted first so the /api/admin/* patterns win over any
+   * broader match below. Session state lives in this closure: a login flips it,
+   * so a spec can drive login → dashboard → logout as one journey.
+   *
+   * Shapes mirror the real backend exactly (see modules/admin-auth/) — a mock
+   * that drifts from the contract tests nothing.
+   */
+  let adminSignedIn = adminAuthenticated;
+
+  const notConfigured = (route: Route) =>
+    json(route, 503, {
+      error: "Admin access is not configured",
+      code: "ADMIN_NOT_CONFIGURED",
+    });
+
+  await page.route("**/api/admin/auth/me", (route) => {
+    if (adminNotConfigured) return notConfigured(route);
+    if (!adminSignedIn) {
+      return json(route, 401, {
+        error: "Admin login required",
+        code: "ADMIN_NOT_AUTHENTICATED",
+      });
+    }
+    return json(route, 200, { username: "admin" });
+  });
+
+  await page.route("**/api/admin/auth/login", (route) => {
+    if (adminNotConfigured) return notConfigured(route);
+    if (adminLoginFails) {
+      // Generic by design: the real backend never reveals WHICH credential was
+      // wrong.
+      return json(route, 401, {
+        error: "Invalid credentials",
+        code: "ADMIN_INVALID_CREDENTIALS",
+      });
+    }
+    adminSignedIn = true;
+    return json(route, 200, { username: "admin" });
+  });
+
+  await page.route("**/api/admin/auth/logout", (route) => {
+    if (adminNotConfigured) return notConfigured(route);
+    adminSignedIn = false;
+    return json(route, 200, { ok: true });
+  });
 
   const revoked = (route: Route) =>
     json(route, 401, {
