@@ -100,6 +100,31 @@ describe("a revoked session is rejected everywhere it is presented", () => {
     expect(res.body.error).toMatch(/another device/i);
   });
 
+  // The message must be honest about WHY the session ended. Reusing the
+  // "another device" wording for an admin's Revoke Access / Force Logout
+  // would tell the user something false — nobody signed in anywhere.
+  it("401s a DIFFERENT message — not 'another device' — when an admin revoked it", async () => {
+    const { app, sessionStore, cookie, sessionId } = await setup();
+    await sessionStore.revoke(sessionId, "user_revoked");
+
+    const res = await request(app).get("/api/auth/google/status").set("Cookie", cookie);
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SESSION_REVOKED");
+    expect(res.body.error).toMatch(/administrator/i);
+    expect(res.body.error).not.toMatch(/another device/i);
+  });
+
+  it("still says 'another device' for a real Session Replacement (logout reason unaffected)", async () => {
+    const { app, sessionStore, cookie, sessionId } = await setup();
+    await sessionStore.revoke(sessionId, "logout");
+
+    const res = await request(app).get("/api/auth/google/status").set("Cookie", cookie);
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/another device/i);
+  });
+
   it("401s SESSION_REVOKED on the guarded /contacts/save", async () => {
     const { app, sessionStore, cookie, sessionId } = await setup();
     await sessionStore.revoke(sessionId, "replaced_by_new_login");

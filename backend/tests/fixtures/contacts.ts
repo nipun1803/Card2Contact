@@ -47,6 +47,12 @@ export function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
     refreshToken: "refresh-token",
     tokenExpiry: null,
     savedContactsCount: 0,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    lastLoginAt: null,
+    disabledAt: null,
+    disabledBy: null,
+    restoredAt: null,
+    restoredBy: null,
     ...overrides,
   };
 }

@@ -128,6 +128,22 @@ describe("PgSessionStore.isRevoked", () => {
   });
 });
 
+describe("PgSessionStore.getRevokedReason", () => {
+  it("returns the stored reason for a revoked session", async () => {
+    const { pool, calls } = fakePool(() => ({ rows: [{ revoked_reason: "user_revoked" }] }));
+    expect(await new PgSessionStore(pool).getRevokedReason("sess-1")).toBe("user_revoked");
+
+    const { sql, params } = calls[0];
+    expect(sql).toContain("revoked_at IS NOT NULL");
+    expect(params).toEqual(["sess-1"]);
+  });
+
+  it("is null for an unknown or non-revoked id", async () => {
+    const { pool } = fakePool(() => ({ rows: [] }));
+    expect(await new PgSessionStore(pool).getRevokedReason("never-existed")).toBeNull();
+  });
+});
+
 describe("PgSessionStore.revoke", () => {
   it("soft-deletes with a reason and keeps the first revocation's timestamp", async () => {
     const { pool, calls } = fakePool();

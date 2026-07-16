@@ -4,7 +4,13 @@ import {
   CardNotFoundError,
   CardSessionStore,
 } from "../../src/shared/store/card-session-store";
-import { UserRecord, UserStore, TokenSet } from "../../src/shared/store/user-store";
+import {
+  UserRecord,
+  UserStore,
+  TokenSet,
+  ListUsersResult,
+  UserStats,
+} from "../../src/shared/store/user-store";
 import {
   PENDING_TTL_MS,
   PendingSessionRecord,
@@ -76,11 +82,25 @@ export function makeUserStore(overrides: Partial<UserStore> = {}): UserStore {
       refreshToken: input.refreshToken,
       tokenExpiry: input.tokenExpiry,
       savedContactsCount: 0,
+      createdAt: new Date(),
+      lastLoginAt: null,
+      disabledAt: null,
+      disabledBy: null,
+      restoredAt: null,
+      restoredBy: null,
     })),
     updateTokens: vi.fn(async () => {}),
     setSpreadsheet: vi.fn(async () => {}),
     clearTokens: vi.fn(async () => {}),
     incrementSavedContactsCount: vi.fn(async () => 1),
+    list: vi.fn(
+      async (): Promise<ListUsersResult> => ({ users: [], nextCursor: null, total: 0, totalPages: 0 })
+    ),
+    stats: vi.fn(
+      async (): Promise<UserStats> => ({ total: 0, active: 0, disabled: 0, recentLogins: 0, totalScans: 0 })
+    ),
+    disable: vi.fn(async () => null),
+    restore: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -98,6 +118,12 @@ export function makeUserRecord(overrides: Partial<UserRecord> = {}): UserRecord 
     refreshToken: "rt",
     tokenExpiry: null,
     savedContactsCount: 0,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    lastLoginAt: null,
+    disabledAt: null,
+    disabledBy: null,
+    restoredAt: null,
+    restoredBy: null,
     ...overrides,
   };
 }
@@ -204,6 +230,11 @@ export function makeSessionStore(): SessionStore & {
     // Deliberately independent of the lifetime bounds: an expired-then-revoked
     // session must still report as revoked.
     isRevoked: vi.fn(async (id: string) => sessions.get(id)?.revokedAt != null),
+
+    getRevokedReason: vi.fn(async (id: string) => {
+      const s = sessions.get(id);
+      return s?.revokedAt != null ? s.revokedReason : null;
+    }),
 
     touch: vi.fn(async (id: string) => {
       const s = sessions.get(id);

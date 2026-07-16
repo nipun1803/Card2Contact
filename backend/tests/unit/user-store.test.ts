@@ -16,6 +16,8 @@ function fakePool(queryImpl: (sql: string, params?: unknown[]) => { rows: unknow
 
 const codec = new IdentityTokenCodec();
 
+const CREATED_AT = new Date("2026-01-01T00:00:00.000Z");
+
 const dbRow = {
   google_user_id: "u1",
   email: "ada@example.com",
@@ -26,6 +28,12 @@ const dbRow = {
   refresh_token: "rt",
   token_expiry: "1700000000000", // pg returns BIGINT as a string
   saved_contacts_count: 3,
+  created_at: CREATED_AT,
+  last_login_at: null,
+  disabled_at: null,
+  disabled_by: null,
+  restored_at: null,
+  restored_by: null,
 };
 
 describe("PgUserStore.findById", () => {
@@ -42,6 +50,12 @@ describe("PgUserStore.findById", () => {
       refreshToken: "rt",
       tokenExpiry: 1700000000000,
       savedContactsCount: 3,
+      createdAt: CREATED_AT,
+      lastLoginAt: null,
+      disabledAt: null,
+      disabledBy: null,
+      restoredAt: null,
+      restoredBy: null,
     });
     expect(typeof user!.tokenExpiry).toBe("number");
   });
@@ -326,5 +340,161 @@ describe("PgUserStore spreadsheet url fallback", () => {
     );
     const user = await store.findById("u1");
     expect(user!.spreadsheetUrl).toBe("https://stored.example/x");
+  });
+});
+
+describe("PgUserStore.list", () => {
+  it("U1: passes a search term through as an ILIKE param", async () => {
+    let capturedSql = "";
+    let capturedParams: unknown[] = [];
+    const store = new PgUserStore(
+      fakePool((sql, params) => {
+        capturedSql = sql;
+        capturedParams = params ?? [];
+        if (sql.includes("COUNT(*)")) return { rows: [{ count: "1" }] };
+        return { rows: [dbRow] };
+      }),
+      codec,
+    );
+
+    await store.list({ limit: 20, search: "ada" });
+
+    expect(capturedSql).toMatch(/email ILIKE/i);
+    expect(capturedParams).toContain("%ada%");
+  });
+
+  it("U2: applies the active/disabled status filter", async () => {
+    let capturedSql = "";
+    const store = new PgUserStore(
+      fakePool((sql) => {
+        capturedSql = sql;
+        if (sql.includes("COUNT(*)")) return { rows: [{ count: "0" }] };
+        return { rows: [] };
+      }),
+      codec,
+    );
+
+    await store.list({ limit: 20, status: "disabled" });
+    expect(capturedSql).toMatch(/disabled_at IS NOT NULL/);
+  });
+
+  it("U3: sorts by the requested field/direction and paginates via a cursor", async () => {
+    const rows = [
+      { ...dbRow, google_user_id: "u2" },
+      { ...dbRow, google_user_id: "u3" },
+      { ...dbRow, google_user_id: "u4" },
+    ];
+    let capturedSql = "";
+    const store = new PgUserStore(
+      fakePool((sql) => {
+        capturedSql = sql;
+        if (sql.includes("COUNT(*)")) return { rows: [{ count: "3" }] };
+        return { rows };
+      }),
+      codec,
+    );
+
+    const result = await store.list({ limit: 2, sortField: "email", sortDirection: "asc" });
+
+    expect(capturedSql).toMatch(/ORDER BY email ASC/);
+    expect(result.users).toHaveLength(2);
+    expect(result.nextCursor).not.toBeNull();
+    expect(result.total).toBe(3);
+    expect(result.totalPages).toBe(2);
+  });
+
+  it("returns nextCursor: null when there is no further page", async () => {
+    const store = new PgUserStore(
+      fakePool((sql) => {
+        if (sql.includes("COUNT(*)")) return { rows: [{ count: "1" }] };
+        return { rows: [dbRow] };
+      }),
+      codec,
+    );
+
+    const result = await store.list({ limit: 20 });
+    expect(result.nextCursor).toBeNull();
+  });
+});
+
+describe("PgUserStore.stats", () => {
+  it("U4: returns total/active/disabled/recentLogins/totalScans counts", async () => {
+    const store = new PgUserStore(
+      fakePool(() => ({
+        rows: [{ total: "10", active: "8", disabled: "2", recent_logins: "3", total_scans: "42" }],
+      })),
+      codec,
+    );
+
+    expect(await store.stats()).toEqual({
+      total: 10,
+      active: 8,
+      disabled: 2,
+      recentLogins: 3,
+      totalScans: 42,
+    });
+  });
+
+  it("U4b: totalScans is 0, not NaN/null, when the users table is empty", async () => {
+    const store = new PgUserStore(
+      fakePool(() => ({
+        rows: [{ total: "0", active: "0", disabled: "0", recent_logins: "0", total_scans: "0" }],
+      })),
+      codec,
+    );
+
+    expect((await store.stats()).totalScans).toBe(0);
+  });
+});
+
+describe("PgUserStore.disable", () => {
+  it("U5: is idempotent — COALESCE guards disabled_at and disabled_by", async () => {
+    let capturedSql = "";
+    let capturedParams: unknown[] = [];
+    const store = new PgUserStore(
+      fakePool((sql, params) => {
+        capturedSql = sql;
+        capturedParams = params ?? [];
+        return { rows: [{ ...dbRow, disabled_at: new Date(), disabled_by: "admin" }] };
+      }),
+      codec,
+    );
+
+    const user = await store.disable("u1", "admin");
+
+    expect(capturedSql).toMatch(/disabled_at = COALESCE\(disabled_at, now\(\)\)/);
+    expect(capturedSql).toMatch(/disabled_by = COALESCE\(disabled_by, \$2\)/);
+    expect(capturedParams).toEqual(["u1", "admin"]);
+    expect(user!.disabledBy).toBe("admin");
+  });
+
+  it("returns null when the user doesn't exist", async () => {
+    const store = new PgUserStore(fakePool(() => ({ rows: [] })), codec);
+    expect(await store.disable("ghost", "admin")).toBeNull();
+  });
+});
+
+describe("PgUserStore.restore", () => {
+  it("U6: clears disabled_at/disabled_by and stamps restored_at/restored_by", async () => {
+    let capturedSql = "";
+    const store = new PgUserStore(
+      fakePool((sql) => {
+        capturedSql = sql;
+        return { rows: [{ ...dbRow, disabled_at: null, disabled_by: null, restored_by: "admin" }] };
+      }),
+      codec,
+    );
+
+    const user = await store.restore("u1", "admin");
+
+    expect(capturedSql).toMatch(/disabled_at = NULL, disabled_by = NULL/);
+    expect(capturedSql).toMatch(/restored_at = now\(\), restored_by = \$2/);
+    expect(user!.disabledAt).toBeNull();
+    expect(user!.restoredBy).toBe("admin");
+  });
+
+  it("returns null when the user doesn't exist", async () => {
+    const store = new PgUserStore(fakePool(() => ({ rows: [] })), codec);
+    expect(await store.restore("ghost", "admin")).toBeNull();
   });
 });

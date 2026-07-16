@@ -26,6 +26,12 @@ const user: UserRecord = {
   refreshToken: "rt",
   tokenExpiry: null,
   savedContactsCount: 0,
+  createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  lastLoginAt: null,
+  disabledAt: null,
+  disabledBy: null,
+  restoredAt: null,
+  restoredBy: null,
 };
 
 const CHROME_MAC =

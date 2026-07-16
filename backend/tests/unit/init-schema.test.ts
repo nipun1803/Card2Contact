@@ -55,6 +55,29 @@ describe("initSchema", () => {
     expect(all).toContain("ADD COLUMN IF NOT EXISTS spreadsheet_title");
   });
 
+  it("adds the Admin User Management disable/restore columns additively", async () => {
+    const { pool, sql } = recordingPool();
+    await initSchema(pool);
+    const all = joined(sql);
+    expect(all).toContain("ADD COLUMN IF NOT EXISTS disabled_at");
+    expect(all).toContain("ADD COLUMN IF NOT EXISTS disabled_by");
+    expect(all).toContain("ADD COLUMN IF NOT EXISTS restored_at");
+    expect(all).toContain("ADD COLUMN IF NOT EXISTS restored_by");
+    expect(all).toContain("CREATE INDEX IF NOT EXISTS users_disabled_idx");
+  });
+
+  it("creates the audit_log table with both indexes and no FK to users", async () => {
+    const { pool, sql } = recordingPool();
+    await initSchema(pool);
+    const all = joined(sql);
+    expect(all).toContain("CREATE TABLE IF NOT EXISTS audit_log");
+    expect(all).toContain("CREATE INDEX IF NOT EXISTS audit_log_user_ts_idx");
+    expect(all).toContain("CREATE INDEX IF NOT EXISTS audit_log_ts_idx");
+
+    const auditLogDdl = sql.find((s) => s.includes("CREATE TABLE IF NOT EXISTS audit_log"))!;
+    expect(auditLogDdl).not.toContain("REFERENCES users");
+  });
+
   it("cascades sessions when a user row is deleted, so none are orphaned", async () => {
     const { pool, sql } = recordingPool();
     await initSchema(pool);
