@@ -1,9 +1,27 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { BarChart3, FileText, Settings2, Users } from "lucide-react";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { BarChart3, FileText, Gauge, Inbox, Layers, LogOut, Settings2, User, Users } from "lucide-react";
+import { useState } from "react";
 import { useAdminAuth, useAdminAuthActions } from "@/features/admin/useAdminAuth";
-import { Button } from "@/shared/components/ui/button";
+import { useUpgradeRequestCount } from "@/features/admin/useAdminLicenses";
+import { Logo } from "@/shared/components/common/Logo";
+import { ConfirmDialog } from "@/shared/components/common/ConfirmDialog";
+import { ThemeToggle } from "@/shared/components/common/ThemeToggle";
+import { Badge } from "@/shared/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/shared/components/ui/avatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/shared/components/ui/dropdown-menu";
+import { ThemeProvider } from "@/app/ThemeProvider";
 import { ROUTES } from "@/shared/lib/constants";
 import { cn } from "@/shared/utils/cn";
+import { initials } from "@/shared/utils/format";
+
+const ADMIN_THEME_STORAGE_KEY = "c2c.admin-theme";
 
 interface NavItem {
   label: string;
@@ -22,8 +40,11 @@ interface NavItem {
  */
 const NAV_ITEMS: NavItem[] = [
   { label: "Users", icon: Users, to: ROUTES.adminUsers },
+  { label: "Licenses", icon: Gauge, to: ROUTES.adminLicenses },
+  { label: "Tiers", icon: Layers, to: ROUTES.adminTiers },
+  { label: "Requests", icon: Inbox, to: ROUTES.adminRequests },
+  { label: "License Settings", icon: Settings2, to: ROUTES.adminLicenseSettings },
   { label: "Analytics", icon: BarChart3 },
-  { label: "Configuration", icon: Settings2 },
   { label: "Logs", icon: FileText },
 ];
 
@@ -39,6 +60,9 @@ export default function AdminDashboard() {
   const { username } = useAdminAuth();
   const { logout } = useAdminAuthActions();
   const navigate = useNavigate();
+  const { data: requestCount } = useUpgradeRequestCount();
+  const pendingRequests = requestCount?.data.pendingCount ?? 0;
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   async function handleLogout() {
     await logout.mutateAsync();
@@ -46,19 +70,52 @@ export default function AdminDashboard() {
   }
 
   return (
+    <ThemeProvider storageKey={ADMIN_THEME_STORAGE_KEY}>
     <div className="min-h-dvh bg-background">
-      <header className="border-b border-border bg-card">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-3 px-4 py-4 sm:px-6">
-          <span className="text-lg font-semibold tracking-tight">Card2Contact Admin</span>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-sm text-muted-foreground sm:inline">
-              Signed in as <span className="font-medium text-foreground">{username}</span>
-            </span>
-            <Button variant="secondary" size="sm" onClick={() => void handleLogout()} disabled={logout.isPending}>
-              {logout.isPending ? "Logging out…" : "Log out"}
-            </Button>
+      <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-3 px-4 pt-4 sm:px-6">
+          <Link to={ROUTES.adminUsers} className="flex items-center gap-2.5 rounded-md focus-ring" aria-label="Go to admin users">
+            <Logo />
+            <Badge variant="outline" className="uppercase tracking-wide">
+              Admin
+            </Badge>
+          </Link>
+
+          <div className="flex items-center gap-1">
+            <ThemeToggle />
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className="flex items-center gap-2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                aria-label="Account menu"
+              >
+                <Avatar>
+                  <AvatarFallback>{initials(username)}</AvatarFallback>
+                </Avatar>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel className="truncate">{username ?? "Signed in"}</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link to={ROUTES.adminAccount}>
+                    <User aria-hidden />
+                    Account
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-destructive focus:bg-destructive/10 focus:text-destructive [&_svg]:text-destructive"
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    setConfirmOpen(true);
+                  }}
+                >
+                  <LogOut aria-hidden />
+                  Log out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <nav className="flex w-full flex-wrap items-center gap-1 overflow-x-auto">
+
+          <nav className="flex w-full flex-wrap items-center gap-1 overflow-x-auto pb-3">
             {NAV_ITEMS.map((item) =>
               item.to ? (
                 <NavLink
@@ -75,6 +132,14 @@ export default function AdminDashboard() {
                 >
                   <item.icon className="size-4" />
                   {item.label}
+                  {item.to === ROUTES.adminRequests && pendingRequests > 0 && (
+                    <span
+                      aria-label={`${pendingRequests} pending`}
+                      className="ml-1 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground"
+                    >
+                      {pendingRequests}
+                    </span>
+                  )}
                 </NavLink>
               ) : (
                 <span
@@ -94,7 +159,19 @@ export default function AdminDashboard() {
           </nav>
         </div>
       </header>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Log out?"
+        description="You’ll need to sign in again to access the admin console."
+        confirmLabel="Log out"
+        loading={logout.isPending}
+        onConfirm={handleLogout}
+      />
+
       <Outlet />
     </div>
+    </ThemeProvider>
   );
 }
