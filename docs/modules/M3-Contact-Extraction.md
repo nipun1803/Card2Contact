@@ -75,9 +75,9 @@ Each step narrows what the next step can see:
 3. Email = first regex match over the whole text.
 4. Phones = all regex matches over the whole text (line breaks excluded from the match class, so a phone can never swallow the next line's leading digit).
 5. `textLines` = remaining lines minus the email line, mostly-digit lines, and address-like lines.
-6. Name = first `textLines` entry matching a name shape, not a designation/company keyword.
-7. Designation = first remaining entry matching a job-title keyword.
-8. Company = every entry still left, joined with a space (captures multi-line company names/wordmarks).
+6. Designation = first `textLines` entry matching a job-title keyword — found before Name because a keyword match is a much stronger signal than "looks like a name" (e.g. a one-word company/brand line can otherwise pass for a name).
+7. Name = the `textLines` entry immediately adjacent to the designation (checked before, then after) that matches a name shape; falls back to the first name-shaped entry in `textLines` when there's no designation, or nothing name-shaped sits next to it. Adjacency, not raw text order, is what makes a two-column card (logo/company on the left, person's details on the right — read left-column-first by OCR) resolve to the right name instead of the company/brand text that happens to read first.
+8. Company = every entry still left after Name and Designation are removed, joined with a space (captures multi-line company names/wordmarks, on either side of the name/designation pair).
 9. Addresses = a separate pass over all lines (including blanks), grouping consecutive address-like lines into one entry each; a blank line is a hard boundary between two addresses.
 
 | Field | Heuristic |
@@ -101,6 +101,17 @@ Input: `"Jane Doe\nBranch Head\nAcme Solutions\nFlower Boutique\n+91 91876 54321
   "category": ""
 }
 ```
+
+### Known limitation
+
+The designation-adjacency rule (step 7) only fixes a company-before-name reading
+order when there's a designation line to anchor to. A two-column card with a
+one-word brand/logo line, no legal-suffix keyword (see `COMPANY_KEYWORDS`), and
+no designation line at all is still ambiguous from plain text alone — e.g.
+`"Infinity\n\nSonia Arora\n\nsonia.a@mail.web"` still extracts `name: "Infinity"`.
+Resolving that generally needs real OCR bounding-box/layout data, which the
+current Mistral OCR integration does not provide for text (only for extracted
+images — see `text-recognition.client.ts`).
 
 ### Error handling / Performance
 

@@ -98,25 +98,44 @@ export function parseContactFromText(rawText: string): Contact {
     return !isAddressLike(line);
   });
 
-  // Name — heuristic: the first remaining line that reads like a person's
-  // name (letters/spaces/typical name punctuation only, 1-5 words) — this
-  // excludes designation/company lines and stray symbols/taglines so only
-  // actual card content lands in the field.
-  const nameIndex = textLines.findIndex((line) => looksLikeName(line));
+  // Designation — found FIRST, on the untouched textLines: a job-title
+  // keyword match (e.g. "Branch Head", "Managing Director") is a far more
+  // reliable signal than "looks like a name", so it anchors the name search
+  // below rather than the other way around.
+  const designationIndex = textLines.findIndex((line) => looksLikeDesignation(line));
+  if (designationIndex !== -1) {
+    contact.designation = textLines[designationIndex];
+  }
+
+  // Name — heuristic: OCR reading order is not reliable across card layouts
+  // (a two-column card with a logo/company on the left and the person's
+  // details on the right is read left-column-first, so "first name-shaped
+  // line" can land on a one-word company/brand name instead — see the
+  // "Infinity" / "Sonia Arora" regression). Every card layout we've seen
+  // DOES keep the person's name adjacent to their designation, almost always
+  // immediately before it, so when a designation is found, prefer a
+  // name-shaped line next to it (before, then after) over the first
+  // name-shaped line in the whole card. Falls back to "first name-shaped
+  // line" when there's no designation to anchor to, or nothing name-shaped
+  // sits next to it.
+  let nameIndex = -1;
+  if (designationIndex !== -1) {
+    const before = designationIndex - 1;
+    const after = designationIndex + 1;
+    if (before >= 0 && looksLikeName(textLines[before])) {
+      nameIndex = before;
+    } else if (after < textLines.length && looksLikeName(textLines[after])) {
+      nameIndex = after;
+    }
+  }
+  if (nameIndex === -1) {
+    nameIndex = textLines.findIndex((line, i) => i !== designationIndex && looksLikeName(line));
+  }
   if (nameIndex !== -1) {
     contact.name = textLines[nameIndex];
   }
 
-  const remaining = textLines.filter((_, i) => i !== nameIndex);
-
-  // Designation — heuristic: a line containing a common job-title keyword
-  // (e.g. "Branch Head", "Managing Director"), searched before company so a
-  // title line is never mistaken for the company name.
-  const designationIndex = remaining.findIndex((line) => looksLikeDesignation(line));
-  if (designationIndex !== -1) {
-    contact.designation = remaining[designationIndex];
-  }
-  const afterDesignation = remaining.filter((_, i) => i !== designationIndex);
+  const afterDesignation = textLines.filter((_, i) => i !== nameIndex && i !== designationIndex);
 
   // Company — heuristic: once name/designation/email/phone/address lines are
   // removed, whatever text lines remain are almost always all part of the

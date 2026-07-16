@@ -108,6 +108,64 @@ describe("parseContactFromText", () => {
     });
   });
 
+  describe("two-column layout: company/logo column read before the name column (reported bug)", () => {
+    const c = parseContactFromText(OCR_SAMPLES.companyColumnBeforeName);
+
+    it("extracts the person's name, not the company/logo text that reads first", () => {
+      expect(c.name).toBe("Sonia Arora");
+    });
+
+    it("extracts the designation adjacent to the name", () => {
+      expect(c.designation).toBe("Branch Head");
+    });
+
+    it("extracts the full company name, not just part of it", () => {
+      expect(c.company).toBe("Infinity Flower Boutique");
+    });
+
+    it("does not put company text in the name field or name text in company", () => {
+      expect(c.name).not.toContain("Infinity");
+      expect(c.company).not.toContain("Sonia Arora");
+    });
+
+    it("still extracts both phone numbers and the email correctly", () => {
+      expect(c.phones).toEqual(["+91 91876 54321", "+91 22 6718 6718"]);
+      expect(c.email).toBe("sonia.a@mail.web");
+    });
+  });
+
+  describe("two-column layout: single-line company with legal suffix before the name column", () => {
+    const c = parseContactFromText(OCR_SAMPLES.companyColumnBeforeNameWithSuffix);
+
+    it("extracts the name near the designation, not the company line that reads first", () => {
+      expect(c.name).toBe("Marcus Chen");
+    });
+
+    it("extracts the multi-word designation", () => {
+      expect(c.designation).toBe("Vice President, Engineering");
+    });
+
+    it("extracts the company with its legal suffix intact", () => {
+      expect(c.company).toBe("Nimbus Cloud Solutions Inc");
+    });
+  });
+
+  describe("two-column layout: designation line reads before the name line", () => {
+    const c = parseContactFromText(OCR_SAMPLES.designationBeforeNameInColumn);
+
+    it("still finds the name via adjacency, even though it comes after the designation", () => {
+      expect(c.name).toBe("Priya Nair");
+    });
+
+    it("extracts the designation", () => {
+      expect(c.designation).toBe("Founder");
+    });
+
+    it("attributes the leading company line to company, not name", () => {
+      expect(c.company).toBe("Bloom & Co");
+    });
+  });
+
   describe("designation before a company-suffix line", () => {
     const c = parseContactFromText(OCR_SAMPLES.designationAndSuffix);
 

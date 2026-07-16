@@ -103,6 +103,60 @@ export const OCR_SAMPLES = {
     "sonia.a@mail.web",
   ].join("\n"),
 
+  /**
+   * Reported bug: a two-column card (logo/company wordmark on the left,
+   * name/designation/contact details on the right). OCR reads left-to-right
+   * then top-to-bottom, so the company text comes out BEFORE the person's
+   * name in the raw text — unlike `markdownArtifacts`, where the logo is
+   * merely a stray image ref above a single-column layout. Same card as
+   * `markdownArtifacts` in content, but in the reading order Mistral actually
+   * produced for the real (two-column) card image.
+   */
+  companyColumnBeforeName: [
+    "![img-0.jpeg](img-0.jpeg)",
+    "",
+    "**Infinity**",
+    "Flower Boutique",
+    "",
+    "Sonia Arora",
+    "Branch Head",
+    "",
+    "+91 91876 54321",
+    "+91 22 6718 6718",
+    "",
+    "sonia.a@mail.web",
+  ].join("\n"),
+
+  /**
+   * Same left-column-company layout, but the company is a single line (no
+   * wrapped wordmark) and has a recognizable legal suffix — checks the fix
+   * doesn't depend on the company being multi-line or suffix-less.
+   */
+  companyColumnBeforeNameWithSuffix: [
+    "Nimbus Cloud Solutions Inc",
+    "",
+    "Marcus Chen",
+    "Vice President, Engineering",
+    "",
+    "marcus.chen@nimbuscloud.io",
+    "+1 (415) 555-0134",
+  ].join("\n"),
+
+  /**
+   * Two-column layout where the designation line comes BEFORE the name line
+   * (both still adjacent, but in the opposite order from the common case) —
+   * checks the "prefer before, fall back to after" adjacency rule.
+   */
+  designationBeforeNameInColumn: [
+    "Bloom & Co",
+    "",
+    "Founder",
+    "Priya Nair",
+    "",
+    "priya@bloomandco.in",
+    "+91 98765 43210",
+  ].join("\n"),
+
   /** A second real-card shape: designation before company-suffix line, US number. */
   designationAndSuffix: [
     "Marcus Chen",
