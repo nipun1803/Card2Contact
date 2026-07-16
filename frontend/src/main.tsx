@@ -6,7 +6,11 @@ import "@/styles/globals.css";
 
 const sentryDsn = import.meta.env.VITE_SENTRY_DSN;
 if (sentryDsn) {
-  Sentry.init({ dsn: sentryDsn });
+  Sentry.init({
+    dsn: sentryDsn,
+    integrations: [Sentry.consoleLoggingIntegration({ levels: ["log", "warn", "error"] })],
+    enableLogs: true,
+  });
 }
 
 /**
