@@ -17,6 +17,8 @@ const SessionConflict = lazy(() => import("@/routes/SessionConflict"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 const AdminLogin = lazy(() => import("@/routes/admin/AdminLogin"));
 const AdminDashboard = lazy(() => import("@/routes/admin/AdminDashboard"));
+const AdminUsers = lazy(() => import("@/routes/admin/AdminUsers"));
+const AdminUserDetail = lazy(() => import("@/routes/admin/AdminUserDetail"));
 
 /** Suspense boundary used while a lazy page chunk loads. */
 function Lazy({ children }: { children: React.ReactNode }) {
@@ -79,7 +81,19 @@ export const router = createBrowserRouter([
   {
     element: <AdminProtectedRoute />,
     children: [
-      { path: ROUTES.adminDashboard, element: <Lazy><AdminDashboard /></Lazy> },
+      {
+        // AdminDashboard is now a shell (nav + header) wrapping an <Outlet/> —
+        // see its own comment. User Directory and User Details nest as
+        // children so the nav persists across both pages without duplicating
+        // the header in each.
+        element: <Lazy><AdminDashboard /></Lazy>,
+        children: [
+          { index: true, element: <Navigate to={ROUTES.adminUsers} replace /> },
+          { path: ROUTES.adminDashboard, element: <Navigate to={ROUTES.adminUsers} replace /> },
+          { path: ROUTES.adminUsers, element: <Lazy><AdminUsers /></Lazy> },
+          { path: "/admin/users/:googleUserId", element: <Lazy><AdminUserDetail /></Lazy> },
+        ],
+      },
     ],
   },
   { path: "/404", element: <Lazy><NotFound /></Lazy> },

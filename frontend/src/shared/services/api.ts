@@ -1,6 +1,10 @@
 import type { Contact, ContactEdits } from "@/shared/types/contact";
 import type {
+  AdminAuditResponse,
+  AdminForceLogoutResponse,
   AdminMe,
+  AdminUserDetailResponse,
+  AdminUserListResponse,
   AuthStatus,
   CardMode,
   ConfirmResponse,
@@ -55,6 +59,20 @@ export class SessionRevokedError extends ApiError {
   }
 }
 
+/**
+ * A 403 whose body carries `code: "USER_DISABLED"` — an admin revoked this
+ * user's access. Distinct from ReauthError (Google itself rejected the
+ * tokens) and SessionRevokedError (a specific session was ended): this is an
+ * administrative decision, so the UI explains it as such rather than
+ * prompting "reconnect" or "signed in elsewhere".
+ */
+export class UserDisabledError extends ApiError {
+  constructor(message: string) {
+    super(403, message);
+    this.name = "UserDisabledError";
+  }
+}
+
 /** A network-level failure (server unreachable, offline). */
 export class NetworkError extends Error {
   constructor(message = "Network request failed") {
@@ -80,6 +98,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       throw new SessionRevokedError(
         body.error ?? "You were signed out because you signed in on another device",
       );
+    }
+    if (res.status === 403 && body.code === "USER_DISABLED") {
+      throw new UserDisabledError(body.error ?? "This account has been disabled");
     }
     throw new ApiError(res.status, body.error ?? res.statusText);
   }
@@ -199,4 +220,73 @@ export function saveContact(cardId: string, contact: Contact): Promise<SaveRespo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cardId, contact }),
   });
+}
+
+/* ---- Admin user management (Phase 1) -------------------------------------
+ *
+ * All ride the admin_session cookie via `request`'s credentials: "include".
+ * Cursor-based, not page-number based — see ListUsersQuery.cursor.
+ */
+
+export interface ListUsersQuery {
+  cursor?: string;
+  limit?: number;
+  search?: string;
+  status?: "all" | "active" | "disabled";
+  sortField?: "createdAt" | "lastLoginAt" | "savedContactsCount" | "email";
+  sortDirection?: "asc" | "desc";
+  registeredAfter?: string;
+  registeredBefore?: string;
+  lastLoginAfter?: string;
+}
+
+function toQueryString(q: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== "") params.set(k, String(v));
+  }
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
+export function listAdminUsers(query: ListUsersQuery = {}): Promise<AdminUserListResponse> {
+  return request<AdminUserListResponse>(`/api/admin/users${toQueryString({ ...query })}`);
+}
+
+export function getAdminUser(googleUserId: string): Promise<AdminUserDetailResponse> {
+  return request<AdminUserDetailResponse>(`/api/admin/users/${encodeURIComponent(googleUserId)}`);
+}
+
+export function getAdminUserAudit(
+  googleUserId: string,
+  cursor?: string,
+  limit = 20,
+): Promise<AdminAuditResponse> {
+  return request<AdminAuditResponse>(
+    `/api/admin/users/${encodeURIComponent(googleUserId)}/audit${toQueryString({ cursor, limit })}`,
+  );
+}
+
+/** Revoke Access. */
+export function disableAdminUser(googleUserId: string): Promise<AdminUserDetailResponse> {
+  return request<AdminUserDetailResponse>(
+    `/api/admin/users/${encodeURIComponent(googleUserId)}/disable`,
+    { method: "POST" },
+  );
+}
+
+/** Restore Access. */
+export function restoreAdminUser(googleUserId: string): Promise<AdminUserDetailResponse> {
+  return request<AdminUserDetailResponse>(
+    `/api/admin/users/${encodeURIComponent(googleUserId)}/restore`,
+    { method: "POST" },
+  );
+}
+
+/** Kick any active session(s) without disabling the account. */
+export function forceLogoutAdminUser(googleUserId: string): Promise<AdminForceLogoutResponse> {
+  return request<AdminForceLogoutResponse>(
+    `/api/admin/users/${encodeURIComponent(googleUserId)}/force-logout`,
+    { method: "POST" },
+  );
 }

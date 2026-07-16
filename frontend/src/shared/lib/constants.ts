@@ -14,7 +14,13 @@ export const ROUTES = {
    *  user. See src/app/router.tsx and docs/modules/admin/. */
   adminLogin: "/admin/login",
   adminDashboard: "/admin/dashboard",
+  adminUsers: "/admin/users",
 } as const;
+
+/** Admin User Management: detail page path for a given user. */
+export function adminUserDetailPath(googleUserId: string): string {
+  return `/admin/users/${googleUserId}`;
+}
 
 /** Default title of the auto-provisioned spreadsheet (backend constant). */
 export const SPREADSHEET_TITLE = "Card2Contact Contacts";

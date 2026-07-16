@@ -89,11 +89,13 @@ test.describe("admin session journey", () => {
     await page.getByRole("textbox", { name: "Password" }).fill("correct-horse");
     await page.getByRole("button", { name: /sign in/i }).click();
 
-    await expect(page).toHaveURL(/\/admin\/dashboard$/);
-    await expect(page.getByRole("heading", { name: "Admin" })).toBeVisible();
+    // Redirects to the User Directory, the default admin landing view — see
+    // AdminDashboard's shell/Outlet restructuring.
+    await expect(page).toHaveURL(/\/admin\/users$/);
+    await expect(page.getByRole("heading", { name: "User Directory" })).toBeVisible();
     // Proves GET /me resolved and the session cookie round-tripped. Scoped to
-    // the "Signed in as" line — a bare getByText("admin") also matches the
-    // heading and the URL-derived text.
+    // the "Signed in as" line — a bare getByText("admin") also matches other
+    // occurrences of the username elsewhere on the page.
     await expect(page.getByText(/signed in as/i)).toContainText("admin");
   });
 
@@ -143,7 +145,7 @@ test.describe("admin dashboard is guarded", () => {
 
     await page.goto("/admin/dashboard");
 
-    await expect(page.getByRole("heading", { name: "Admin" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "User Directory" })).toBeVisible();
     await expect(page.getByRole("link", { name: /scan/i })).toHaveCount(0);
   });
 });

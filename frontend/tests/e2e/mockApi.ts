@@ -36,6 +36,42 @@ export interface MockOptions {
   adminLoginFails?: boolean;
   /** Answer every admin route 503, as an unconfigured server does. */
   adminNotConfigured?: boolean;
+  /** Seed the User Directory / User Details with these users. */
+  adminUsers?: MockAdminUser[];
+  /** Make POST /admin/users/:id/force-logout 500, to test the dialog's error UI. */
+  adminForceLogoutFails?: boolean;
+}
+
+/** Mirrors AdminUserSummary/AdminUserDetail (src/shared/types/api.ts). */
+export interface MockAdminUser {
+  googleUserId: string;
+  email: string;
+  spreadsheetTitle?: string | null;
+  savedContactsCount?: number;
+  createdAt?: string;
+  lastLoginAt?: string | null;
+  disabled?: boolean;
+  disabledAt?: string | null;
+  disabledBy?: string | null;
+  restoredAt?: string | null;
+  restoredBy?: string | null;
+  activeSession?: { device: string | null; browser: string | null; ip: string | null; lastActivityAt: string } | null;
+}
+
+function toSummary(u: MockAdminUser) {
+  return {
+    googleUserId: u.googleUserId,
+    email: u.email,
+    spreadsheetTitle: u.spreadsheetTitle ?? null,
+    savedContactsCount: u.savedContactsCount ?? 0,
+    createdAt: u.createdAt ?? "2026-01-01T00:00:00.000Z",
+    lastLoginAt: u.lastLoginAt ?? null,
+    disabled: u.disabled ?? false,
+    disabledAt: u.disabledAt ?? null,
+    disabledBy: u.disabledBy ?? null,
+    restoredAt: u.restoredAt ?? null,
+    restoredBy: u.restoredBy ?? null,
+  };
 }
 
 const json = (route: Route, status: number, body: unknown) =>
@@ -52,7 +88,22 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     adminAuthenticated = false,
     adminLoginFails = false,
     adminNotConfigured = false,
+    adminUsers = [],
+    adminForceLogoutFails = false,
   } = opts;
+
+  // Mutable so a spec can disable/restore a user across the journey.
+  const users = adminUsers.map((u) => ({ ...u }));
+  // Per-user audit log, appended to by disable/restore/force-logout below —
+  // stateful so a spec can prove an action shows up in Audit History, not
+  // just that the action's own endpoint returned 200.
+  const auditLog = new Map<string, Array<{ id: number; ts: string; event: string }>>();
+  let nextAuditId = 1;
+  function appendAudit(googleUserId: string, event: string) {
+    const entries = auditLog.get(googleUserId) ?? [];
+    entries.unshift({ id: nextAuditId++, ts: "2026-07-16T09:00:00.000Z", event });
+    auditLog.set(googleUserId, entries);
+  }
 
   /**
    * Admin routes, mounted first so the /api/admin/* patterns win over any
@@ -99,6 +150,131 @@ export async function mockBackend(page: Page, opts: MockOptions = {}): Promise<v
     if (adminNotConfigured) return notConfigured(route);
     adminSignedIn = false;
     return json(route, 200, { ok: true });
+  });
+
+  const adminUnauthenticated = (route: Route) =>
+    json(route, 401, { error: "Admin login required", code: "ADMIN_NOT_AUTHENTICATED" });
+
+  // Admin User Management (Phase 1). GET /users must be registered before the
+  // GET /users/:id pattern below — Playwright matches route handlers in
+  // registration order, most-specific-first would be equally correct here,
+  // but the query-string form is unambiguous either way.
+  await page.route("**/api/admin/users?*", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const summaries = users.map(toSummary);
+    const url = new URL(route.request().url());
+    const search = url.searchParams.get("search")?.toLowerCase();
+    const status = url.searchParams.get("status");
+    const filtered = summaries.filter((u) => {
+      if (search && !u.email.toLowerCase().includes(search)) return false;
+      if (status === "active" && u.disabled) return false;
+      if (status === "disabled" && !u.disabled) return false;
+      return true;
+    });
+    return json(route, 200, {
+      data: {
+        users: filtered,
+        stats: {
+          total: summaries.length,
+          active: summaries.filter((u) => !u.disabled).length,
+          disabled: summaries.filter((u) => u.disabled).length,
+          recentLogins: 0,
+          totalScans: summaries.reduce((sum, u) => sum + u.savedContactsCount, 0),
+        },
+      },
+      meta: { page: { total: filtered.length, totalPages: 1, nextCursor: null, limit: 20 } },
+    });
+  });
+  await page.route("**/api/admin/users", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const summaries = users.map(toSummary);
+    return json(route, 200, {
+      data: {
+        users: summaries,
+        stats: {
+          total: summaries.length,
+          active: summaries.filter((u) => !u.disabled).length,
+          disabled: summaries.filter((u) => u.disabled).length,
+          recentLogins: 0,
+          totalScans: summaries.reduce((sum, u) => sum + u.savedContactsCount, 0),
+        },
+      },
+      meta: { page: { total: summaries.length, totalPages: 1, nextCursor: null, limit: 20 } },
+    });
+  });
+
+  await page.route("**/api/admin/users/*/audit*", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const entries = auditLog.get(id ?? "") ?? [];
+    return json(route, 200, {
+      data: {
+        entries: entries.map((e) => ({
+          ...e,
+          googleUserId: id,
+          adminUsername: "admin",
+          sessionId: null,
+          device: null,
+          browser: null,
+          ip: null,
+          outcome: "success",
+          reason: null,
+          cardId: null,
+          revokedCount: null,
+        })),
+      },
+      meta: { page: { total: entries.length, totalPages: entries.length ? 1 : 0, nextCursor: null, limit: 20 } },
+    });
+  });
+
+  await page.route("**/api/admin/users/*/disable", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const u = users.find((x) => x.googleUserId === id);
+    if (!u) return json(route, 404, { error: "User not found", code: "USER_NOT_FOUND" });
+    u.disabled = true;
+    u.disabledAt = "2026-07-16T09:00:00.000Z";
+    u.disabledBy = "admin";
+    appendAudit(u.googleUserId, "admin_user_disabled");
+    return json(route, 200, { data: { ...toSummary(u), activeSession: u.activeSession ?? null } });
+  });
+
+  await page.route("**/api/admin/users/*/restore", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const u = users.find((x) => x.googleUserId === id);
+    if (!u) return json(route, 404, { error: "User not found", code: "USER_NOT_FOUND" });
+    u.disabled = false;
+    u.disabledAt = null;
+    u.disabledBy = null;
+    u.restoredAt = "2026-07-16T09:00:00.000Z";
+    u.restoredBy = "admin";
+    appendAudit(u.googleUserId, "admin_user_restored");
+    return json(route, 200, { data: { ...toSummary(u), activeSession: u.activeSession ?? null } });
+  });
+
+  await page.route("**/api/admin/users/*/force-logout", (route) => {
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    if (adminForceLogoutFails) return json(route, 500, { error: "Internal server error" });
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const u = users.find((x) => x.googleUserId === id);
+    const hadSession = Boolean(u?.activeSession);
+    if (u) u.activeSession = null;
+    if (u && hadSession) appendAudit(u.googleUserId, "admin_user_sessions_revoked");
+    return json(route, 200, { data: { revokedCount: hadSession ? 1 : 0 } });
+  });
+
+  // GET /api/admin/users/:googleUserId — must be registered AFTER the more
+  // specific /audit, /disable, /restore, /force-logout patterns above, since
+  // Playwright matches in registration order and this pattern would otherwise
+  // swallow all of them.
+  await page.route("**/api/admin/users/*", (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    if (!adminSignedIn) return adminUnauthenticated(route);
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    const u = users.find((x) => x.googleUserId === id);
+    if (!u) return json(route, 404, { error: "User not found", code: "USER_NOT_FOUND" });
+    return json(route, 200, { data: { ...toSummary(u), activeSession: u.activeSession ?? null } });
   });
 
   const revoked = (route: Route) =>

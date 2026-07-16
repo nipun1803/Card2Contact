@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/shared/services/api";
+import type { ListUsersQuery } from "@/shared/services/api";
 
 /**
  * Single QueryClient. The only real query in this app is auth status; the
@@ -40,4 +41,10 @@ export const queryKeys = {
    * versa): two unrelated identities refetching each other for no reason.
    */
   adminAuth: ["admin-auth"] as const,
+  /** Admin User Management (Phase 1). Query varies the key so each distinct
+   *  filter/sort/cursor combination caches independently. */
+  adminUsers: (query: ListUsersQuery) => ["admin-users", query] as const,
+  adminUser: (id: string) => ["admin-user", id] as const,
+  adminUserAudit: (id: string, cursor: string | undefined) =>
+    ["admin-user-audit", id, cursor] as const,
 };
