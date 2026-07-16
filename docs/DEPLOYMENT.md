@@ -119,8 +119,18 @@ docker build ./frontend --target prod -t nipun17572/card2contact-frontend:localt
 
 The frontend build here uses `--target prod`, which runs `npm run build`
 (`tsc -b && vite build`) and then serves the compiled `dist/` folder via
-nginx on port 80 inside the image — a completely different artifact from the
-`dev` target used in Step 1.
+`nginx:1.29-alpine` on port 80 inside the image — a completely different
+artifact from the `dev` target used in Step 1. Both this image and the
+backend image are scanned by CI with Trivy on every PR
+(`docker-build-backend`/`docker-build-frontend` in
+`.github/workflows/pr-validation.yml`) and currently scan clean of
+HIGH/CRITICAL findings — see `docs/ARCHITECTURE.md` → *Container hardening*
+for what that took (base-image patch strategy via `apk upgrade`, npm/curl
+stripped from the runtime images, `multer` bumped off a vulnerable 1.x line).
+Re-run `docker build` with `--no-cache` periodically even without a code
+change — the `apk upgrade` step only picks up whatever Alpine has patched as
+of build time, so a stale local image can silently drift from what CI would
+build today.
 
 Quick sanity check that they run:
 

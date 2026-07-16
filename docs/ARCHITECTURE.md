@@ -510,16 +510,23 @@ postgres is internal:
                                         └──▶ /       ──▶ frontend (also host:5173)
 ```
 
-- **nginx** uses the stock `nginx:1.27-alpine` image (no custom Dockerfile) —
-  the root `nginx.conf` is bind-mounted read-only into the container. It
-  reverse-proxies `/api/*` to the `backend` service and everything else
-  (including Vite's HMR WebSocket) to the `frontend` service. Host port
-  defaults to 8080 (`NGINX_PORT` in `.env`, since port 80 is commonly already
-  in use on a dev machine); the internal proxied port is always 80.
-- **backend** (`backend/Dockerfile`) is a 3-stage build: install deps → `tsc`
-  build → production-only image running compiled `dist/index.js`. No
-  devDependencies (including `typescript`/`tsx`) ship in the final image.
-  Also published directly on host port 4000 (`BACKEND_PORT`).
+- **nginx** uses the stock `nginx:1.27-alpine` image for the local dev
+  compose stack (no custom Dockerfile) — the root `nginx.conf` is
+  bind-mounted read-only into the container. It reverse-proxies `/api/*` to
+  the `backend` service and everything else (including Vite's HMR WebSocket)
+  to the `frontend` service. Host port defaults to 8080 (`NGINX_PORT` in
+  `.env`, since port 80 is commonly already in use on a dev machine); the
+  internal proxied port is always 80. (`frontend/Dockerfile`'s own `prod`
+  target — used by `docker-compose.prod.yml`, not this dev stack — runs
+  `nginx:1.29-alpine`; see *Container hardening* below.)
+- **backend** (`backend/Dockerfile`) is a 4-stage build: install deps → `tsc`
+  build → a `prod-deps` stage that runs `npm install --omit=dev` while npm is
+  still present → a `runtime` stage that copies in only `node_modules`,
+  `package.json`, and compiled `dist/`, with npm/npx/corepack deleted before
+  anything else runs. No devDependencies (including `typescript`/`tsx`) ship
+  in the final image, and neither does the npm CLI itself — see *Container
+  hardening* below for why that split exists. Also published directly on
+  host port 4000 (`BACKEND_PORT`).
 - **frontend** (`frontend/Dockerfile`) runs `vite --host` directly (not a
   static build) — matches how the frontend already runs outside Docker, with
   hot reload preserved. `frontend/vite.config.ts`'s own `/api` proxy was
@@ -537,6 +544,66 @@ postgres is internal:
   Console. The OAuth redirect URI intentionally points at the backend's own
   published port (`http://localhost:4000/api/auth/google/callback`) rather
   than through nginx, matching what's registered on the OAuth client.
+
+### Container hardening
+
+Both production runtime images (`backend/Dockerfile`'s `runtime` stage,
+`frontend/Dockerfile`'s `prod` target) are scanned with Trivy
+(`docker-build-backend`/`docker-build-frontend` in
+`.github/workflows/pr-validation.yml`, `severity: HIGH,CRITICAL`,
+`exit-code: "1"` — a HIGH/CRITICAL finding fails the PR check, not just a
+warning). As of the last hardening pass both images scan **clean (0
+HIGH/CRITICAL)**. Three changes got there from a non-trivial baseline (15
+Alpine OS CVEs + 19 Node-tooling CVEs on backend; 35 Alpine OS CVEs on
+frontend):
+
+1. **`apk upgrade --no-cache` in the final stage of both Dockerfiles.**
+   Docker Hub's published `node:20-alpine`/`nginx:1.29-alpine` layers lag
+   Alpine's own package repo by days to weeks — `apk upgrade` at build time
+   pulls whatever Alpine has already patched (openssl, expat, libxml2, etc.)
+   without waiting for the upstream image to be rebuilt. Re-run this as part
+   of every image rebuild, not just once — it's a moving target.
+2. **npm is deleted from the backend's runtime image.** `node:20-alpine`
+   bundles the full npm CLI — including its own vendored `glob`, `tar`,
+   `sigstore`, `cross-spawn`, `minimatch` — at
+   `/usr/local/lib/node_modules/npm`, purely so `npm install` can run inside
+   the image. The runtime never invokes `npm` (`CMD ["node", "dist/index.js"]`
+   only), so those packages' CVEs were pure unused attack surface. The fix
+   splits `npm install --omit=dev` into its own `prod-deps` stage (which
+   still has npm) and copies only the resulting `node_modules` +
+   `package.json` into a `runtime` stage that deletes
+   `npm`/`npx`/`corepack` before anything else runs.
+3. **`curl` is removed from the frontend's `prod` nginx image.** Nothing in
+   this repo's Dockerfiles, docker-compose files, or CI healthchecks
+   (`docker-compose.yml`'s backend healthcheck uses `wget`; postgres uses
+   `pg_isready`) shells out to `curl` inside the frontend container — it
+   shipped only because the base nginx image includes it.
+
+**Remaining accepted risk:** `CVE-2026-45447` (OpenSSL heap use-after-free in
+`PKCS7_verify()`) may still surface on a fresh `node:20-alpine` pull between
+scheduled rebuilds if Alpine's repo snapshot at build time predates the fix —
+`apk upgrade` closes it as soon as the fix lands in Alpine's repo, which
+happened before this pass completed, but the window is real and worth
+re-checking on the next scheduled Trivy run rather than assuming it stays
+closed. A Node major bump (20 → 22/24, tracked separately since it's a bigger
+decision than a base-image patch — see CI's pinned `NODE_VERSION: "20"`)
+would land on a base image built against a newer Alpine snapshot by default.
+
+`multer` was upgraded `1.4.5-lts.2` → `2.2.0` (closes eight HIGH CVEs:
+CVE-2025-47935, -47944, -48997, -7338; CVE-2026-2359, -3304, -3520, -5079).
+The M1 upload route (`memoryStorage`, `.fields()`, `limits.fileSize`,
+`MulterError` code check) needed zero code changes — multer 2.x kept that
+API surface — but it does **not** bundle its own TypeScript types the way
+some 2.x-line packages do; `@types/multer` stays a devDependency, bumped to
+`^2.2.0` to match.
+
+A known, separate, NOT-yet-addressed finding: `googleapis@140.0.1`'s
+dependency chain (`gaxios` → `googleapis-common` → `uuid <11.1.1`) carries a
+moderate `npm audit` finding (CWE-787, buffer bounds check in `uuid`
+v3/v5/v6). It doesn't trip `--audit-level=high` (moderate, not high) and
+requires a major `googleapis` bump (140 → 173) to fix — that's Google OAuth/
+Sheets integration code, out of scope for this hardening pass; tracked here
+so it isn't lost.
 
 ### TLS and `trust proxy`
 

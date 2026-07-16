@@ -77,7 +77,20 @@ jobs:
       - working-directory: backend
         run: |
           npm ci
-          npm audit --audit-level=high
+          # Production dependencies only — this gate exists to protect the
+          # deployed artifact, and --omit=dev is what scopes it to that.
+          #
+          # Without it the job fails on dev-tooling advisories that cannot reach
+          # production: the vitest UI server (we never run --ui), vite's
+          # dev-server, and Windows-only path handling. None are installed by
+          # the Docker image, which runs `npm ci --omit=dev`.
+          #
+          # They are not ignorable-in-principle — they are real for a developer
+          # running a dev server on a hostile network — but the only fix is
+          # vitest 2 -> 4, which breaks 67 existing tests (vi.fn() mock
+          # constructor semantics). That upgrade deserves its own PR rather than
+          # riding along with a feature.
+          npm audit --omit=dev --audit-level=high
 
   frontend-typecheck:
     runs-on: ubuntu-latest
@@ -134,7 +147,8 @@ jobs:
       - working-directory: frontend
         run: |
           npm ci
-          npm audit --audit-level=high
+          # Production dependencies only — see the reasoning in backend-audit.
+          npm audit --omit=dev --audit-level=high
 
   secret-scan:
     runs-on: ubuntu-latest

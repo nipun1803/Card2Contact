@@ -249,10 +249,26 @@ about what ships.
 
 This is a scoping decision, not a suppression: those advisories are real for a
 developer running a dev server on a hostile network. The only fix is vitest
-2 → 4, which breaks 67 existing tests (`vi.fn()` mock-constructor semantics
-changed, hitting every `vi.mock("google-auth-library")` call site). That upgrade
-is worth doing on its own, and `npm audit` (unscoped) locally is how to see what
-it would address.
+2 → 4, and a sandboxed dry-run (documented in full, with the exact failure
+mode, in `docs/VITEST-UPGRADE-PLAN.md`) confirms it currently breaks 68
+existing tests — every `admin-isolation.test.ts` case that signs in through
+the real Google callback, via `vi.mock("google-auth-library")`'s
+mocking/spy-restore semantics changing under vitest 4. That upgrade is worth
+doing on its own — see the linked plan for the target versions, the full
+breaking-change audit against this repo's actual `vitest.config.ts` files,
+and the recommended sequencing — and `npm audit` (unscoped) locally is how to
+see what it would address today.
+
+## Docker image scanning (Trivy)
+
+`docker-build-backend`/`docker-build-frontend` in
+`.github/workflows/pr-validation.yml` build the production runtime image for
+each service and scan it with Trivy (`severity: HIGH,CRITICAL`,
+`exit-code: "1"`) — a HIGH/CRITICAL finding fails the PR, it doesn't just
+warn. As of the last hardening pass both images scan clean. See
+`docs/ARCHITECTURE.md` → *Container hardening* for what changed (base image
+patch strategy, npm/curl removed from runtime images, the `multer` upgrade)
+and the one documented remaining accepted-risk CVE.
 
 ## Coverage snapshot
 
