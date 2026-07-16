@@ -85,6 +85,7 @@ export const router = createBrowserRouter([
    */
   { path: ROUTES.adminLogin, element: <Lazy><AdminLogin /></Lazy> },
   {
+    path: "/admin",
     element: <AdminProtectedRoute />,
     children: [
       {
