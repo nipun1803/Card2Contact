@@ -4,6 +4,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Logo } from "@/shared/components/common/Logo";
 import { ConfirmDialog } from "@/shared/components/common/ConfirmDialog";
+import { ThemeToggle } from "@/shared/components/common/ThemeToggle";
 import { Avatar, AvatarFallback } from "@/shared/components/ui/avatar";
 import {
   DropdownMenu,
@@ -46,36 +47,39 @@ export function AppHeader() {
           <Logo />
         </Link>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            className="flex items-center gap-2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            aria-label="Account menu"
-          >
-            <Avatar>
-              <AvatarFallback>{initials(email)}</AvatarFallback>
-            </Avatar>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel className="truncate">{email ?? "Signed in"}</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <Link to={ROUTES.profile}>
-                <User aria-hidden />
-                Profile
-              </Link>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-destructive focus:bg-destructive/10 focus:text-destructive [&_svg]:text-destructive"
-              onSelect={(e) => {
-                e.preventDefault();
-                setConfirmOpen(true);
-              }}
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className="flex items-center gap-2 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              aria-label="Account menu"
             >
-              <LogOut aria-hidden />
-              Log out
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+              <Avatar>
+                <AvatarFallback>{initials(email)}</AvatarFallback>
+              </Avatar>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel className="truncate">{email ?? "Signed in"}</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link to={ROUTES.profile}>
+                  <User aria-hidden />
+                  Profile
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-destructive focus:bg-destructive/10 focus:text-destructive [&_svg]:text-destructive"
+                onSelect={(e) => {
+                  e.preventDefault();
+                  setConfirmOpen(true);
+                }}
+              >
+                <LogOut aria-hidden />
+                Log out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       <ConfirmDialog
