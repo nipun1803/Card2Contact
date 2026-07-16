@@ -279,11 +279,12 @@ New repository secret** and add each of these:
 | `VPS_PORT` | `22` |
 | `VPS_SSH_KEY` | The full contents of the **private** key file `deploy_key` from Step 5 (including the `-----BEGIN OPENSSH PRIVATE KEY-----` / `-----END...` lines) |
 | `MISTRAL_API_KEY_CI` | A separate, low-quota Mistral API key used only by the E2E job on pull requests — keep it distinct from the production key |
+| `VITE_SENTRY_DSN` | (Optional) The frontend Sentry project's DSN. Unlike the backend's `SENTRY_DSN`, this one **must** go through GitHub Actions rather than the VPS `.env` — Vite inlines `VITE_*` into the static bundle at `docker build` time (`deploy.yml` passes it as a `build-arg`), not at container start, so setting it only on the VPS would have no effect. Leave unset to disable frontend error reporting. |
 
 Note: `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `POSTGRES_*`,
-`MISTRAL_API_KEY` (production), `GOOGLE_OAUTH_CLIENT_ID`/`SECRET` are **not**
-added here — they go directly into a `.env` file on the VPS in Step 8, and
-never pass through GitHub Actions.
+`MISTRAL_API_KEY` (production), `GOOGLE_OAUTH_CLIENT_ID`/`SECRET`, and the
+backend's `SENTRY_DSN` are **not** added here — they go directly into a `.env`
+file on the VPS in Step 8, and never pass through GitHub Actions.
 
 Then set up branch protection: **Settings → Branches → Add branch protection
 rule** for `main` → require these status checks to pass before merging:
@@ -361,6 +362,11 @@ GOOGLE_OAUTH_CLIENT_SECRET=<your Google OAuth client secret>
 GOOGLE_OAUTH_REDIRECT_URI=https://<YOUR_DOMAIN>/api/auth/google/callback
 
 FRONTEND_URL=https://<YOUR_DOMAIN>
+
+# Optional — backend error tracking. A no-op if left unset. This is distinct
+# from VITE_SENTRY_DSN (the frontend's), which lives in GitHub Actions
+# secrets instead — see Step 6.
+SENTRY_DSN=<your backend Sentry project's DSN>
 ```
 
 Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano). Do **not** run

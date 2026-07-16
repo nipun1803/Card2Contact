@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_FLAG_DARK_MODE?: string;
   readonly VITE_FLAG_ANIMATIONS?: string;
   readonly VITE_FLAG_RECENT_SCANS?: string;
+  readonly VITE_SENTRY_DSN?: string;
 }
 
 interface ImportMeta {

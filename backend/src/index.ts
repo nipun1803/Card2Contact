@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "./instrument";
 import { createApp } from "./app";
 import { createPool } from "./shared/db/pool";
 import { initSchemaWithRetry } from "./shared/db/init";

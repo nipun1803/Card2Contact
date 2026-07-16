@@ -35,6 +35,8 @@ services:
       # the container would never see the config even when .env sets it.
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      # Sentry error tracking — optional, no-op when unset.
+      SENTRY_DSN: ${SENTRY_DSN:-}
     ports:
       - "${BACKEND_PORT:-4000}:4000"
     depends_on:
@@ -51,6 +53,11 @@ services:
       context: ./frontend
       target: dev
     restart: unless-stopped
+    environment:
+      # Vite's dev server inlines VITE_* from process.env at startup — no .env
+      # file needed (frontend/.env is dockerignored, so one wouldn't reach the
+      # build context anyway). Optional; a no-op in main.tsx when unset.
+      VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
 

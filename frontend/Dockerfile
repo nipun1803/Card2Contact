@@ -13,6 +13,11 @@ CMD ["npm", "run", "dev", "--", "--host"]
 # --- build: compile the static production bundle ---
 FROM base AS build
 COPY . .
+# Vite inlines VITE_* into the compiled bundle at build time — passed as a
+# build arg (not baked into image layers as ENV would be) since Sentry
+# reporting is optional and unrelated to the runtime container config.
+ARG VITE_SENTRY_DSN
+ENV VITE_SENTRY_DSN=${VITE_SENTRY_DSN}
 RUN npm run build
 
 # --- prod: nginx serving the built static bundle ---
