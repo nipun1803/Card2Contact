@@ -31,7 +31,7 @@ history.
 **Never exposes `spreadsheetUrl`**, only `spreadsheetTitle` — activity
 visibility shouldn't mean a live credential into the user's data.
 
-Out of scope: License Management/quotas, bulk actions, account lockout, a
+Out of scope: bulk actions, account lockout, a
 free-text reason field on Revoke/Restore, backfilling pre-deploy audit
 history, Analytics/Configuration/Logs nav surfaces. See §9.
 
@@ -269,17 +269,20 @@ Two invariants:
 ## 9. Out of Scope / Roadmap
 
 Source of truth for `AdminDashboard.tsx`'s disabled nav placeholders
-(Analytics, Configuration, Logs — greyed out, non-interactive, "Coming
-soon," nothing clickable/404ing/fake). Update here first if a phase ships
-one.
+(Analytics, Logs — greyed out, non-interactive, "Coming soon," nothing
+clickable/404ing/fake). "Configuration" shipped as **License Settings**
+(`AdminLicenseSettings.tsx`) and is a real nav item, not a placeholder;
+the admin's own account/appearance settings ship separately as **My
+Account** (`AdminAccount.tsx`, linked from the "Signed in as" header text,
+not the primary nav — mirrors how the user-facing Profile page sits behind
+the account menu rather than the main nav). Update here first if a phase
+ships one of the remaining placeholders.
 
 | Item | Why deferred |
 |---|---|
-| License Management, quotas, subscriptions | Explicit product decision — no billing concept exists yet |
 | Bulk user actions | Every action is scoped to one `googleUserId`; bulk is a real feature (its own confirm-UX, audit shape), not a small add |
 | Account lockout | Reasoned decision, not a gap — see §4 U4 |
 | Analytics | No usage/engagement metrics surface beyond the directory's stat cards |
-| Configuration | No admin-editable runtime config — env vars only, deploy-time |
 | Logs | `docker logs` is still the only log viewer; `audit_log` is a step toward this, not a UI for it |
 | Free-text reason on Revoke/Restore | Actor is recorded structurally (`disabledBy`/`restoredBy`) — matches the fixed-`reason`-enum convention elsewhere |
 | Backfilling pre-deploy audit history | `audit_log` starts empty; no structured source existed to backfill from |

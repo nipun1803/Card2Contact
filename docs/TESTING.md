@@ -11,14 +11,21 @@ backend/
   src/**/*.test.ts        # legacy co-located unit specs (pre-existing, kept)
   tests/
     unit/                 # service/util/store unit specs (Vitest)
-      admin/              # admin config / service / session store / guard / admin-users service + PgAuditLogger
+      admin/              # admin config / service / session store / guard / admin-users + admin-licenses service + PgAuditLogger
+      quota-store.test.ts # License Management: consume matrix (free/paid/unlimited, expiry, idempotency, scan-block, tier assign/snapshot)
+      quota-guard.test.ts # the enforcement middleware's branching (402/403/allow/overage)
+      tier-store.test.ts  # tier catalog CRUD/clone/search/assigned-counts + is_default/unlimited invariants
+      tier-request-store.test.ts # upgrade requests: one-pending-per-user, atomic pending-guarded decide, queries
+      licensing.service.test.ts  # user surface: myPlan bundle + createRequest validation (tier/custom)
     integration/          # supertest specs driving the real Express app
-      admin/              # admin auth over HTTP + admin-vs-user isolation + admin-users router
+      admin/              # admin auth over HTTP + admin-vs-user isolation + admin-users + admin-licenses router (+ approve/reject)
       google-auth/         # disabled-user OAuth callback gate
       google-sheets/        # disabled-user M5 save gate
+      licensing/          # upgrade requests end-to-end: user files (/api/me) → admin approves/rejects → plan reflects grant
+      quota-enforcement.test.ts  # end-to-end: 402 exhausted, 403 scan-blocked, idempotent retry, anon 401, overage
     fixtures/             # override-able factories (contacts, users, sessions, OCR samples)
-    mocks/                # fake CardSessionStore / UserStore / SheetsClient / OcrClient
-    helpers/              # env defaults (setupFile) + buildTestApp()
+    mocks/                # fake CardSessionStore / UserStore / QuotaStore / LicenseSettingsStore / SheetsClient / OcrClient
+    helpers/              # env defaults (setupFile) + buildTestApp() + buildAuthedTestApp() (signed session cookie)
   vitest.config.ts        # includes both src/**/*.test.ts and tests/**
   tsconfig.test.json      # typechecks tests without touching the prod build
 
@@ -30,6 +37,8 @@ frontend/
     integration/          # (reserved)
     e2e/                  # Playwright specs against the running stack
       admin-users.spec.ts  # User Directory + User Details, account management actions
+      admin-licenses.spec.ts # License Management: tier catalog, editor, tier assignment
+      scan-gating.spec.ts    # 402/403 scan-refusal panels (needs the stack + capture)
       .auth/user.json     # captured Google login (gitignored; created on demand)
     fixtures/             # contact / auth-status / file factories
     mocks/                # (reserved — api mocked inline per spec)
@@ -153,7 +162,13 @@ reason/note input, asserted explicitly since the decision was deliberate, and
 that a failed mutation surfaces its error inline and keeps the dialog open
 rather than closing silently), and the `DataTable`/`Pagination`/`StatusBadge`
 components in isolation (sort-callback firing, page-boundary button
-disabling, badge variant mapping).
+disabling, badge variant mapping). Tier Upgrade Requests
+(`tests/unit/plan/PlanCard.test.tsx`, `tests/unit/admin/AdminRequests.test.tsx`,
+and the enriched `tests/unit/scan/ScanLimitPanel.test.tsx`): the Profile "Your
+Plan" card (tier + remaining, pending-banner state, filing a tier request
+through the dialog), the admin queue (listing a pending request, approve-as-asked,
+reject-with-reason), and the 402 panel showing the plan + a request action while
+the 403 blocked panel stays admin-only.
 
 **E2E** (Playwright, real Docker stack via nginx :8080): landing → login,
 route guards (protected → /login, unknown → /404), the Google sign-in link

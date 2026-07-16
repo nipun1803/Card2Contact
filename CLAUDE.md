@@ -10,18 +10,21 @@ only covers what a coding agent needs before touching the repo.
 
 ## Stack
 
-- Backend: Node.js + TypeScript + Express, modular monolith (`backend/src/modules/` = M1–M5 + google-auth + admin-auth; `backend/src/shared/` = cross-module contracts only).
+- Backend: Node.js + TypeScript + Express, modular monolith (`backend/src/modules/` = M1–M5 + google-auth + admin-auth + admin-users + admin-licenses + licensing; `backend/src/shared/` = cross-module contracts only). `admin-licenses` is the admin surface (behind `adminAuth`); `licensing` is the user's own "my plan" + upgrade-request surface at `/api/me/*` (behind `requireAuth`) — same stores, no shared auth path.
 - Frontend: React + TypeScript (Vite), API-driven, no business logic — calls backend via `fetch` with `credentials: "include"`.
-- Persistence: Postgres — `users` (identity, AES-encrypted OAuth tokens, per-user spreadsheet id/url/title) and `sessions` / `pending_sessions` (single active session). Pipeline state (M1→M4) is in-memory only, keyed by `cardId`, and does not survive a restart — that's intentional.
+- Persistence: Postgres — `users` (identity, AES-encrypted OAuth tokens, per-user spreadsheet id/url/title), `sessions` / `pending_sessions` (single active session), `audit_log`, and the License Management tables `license_settings` / `scan_quotas` / `paid_grants` / `quota_consumptions` / `quota_ledger` / `tiers` / `tier_assignments` / `tier_requests`. Pipeline state (M1→M4) is in-memory only, keyed by `cardId`, and does not survive a restart — that's intentional.
 - Infra: Docker Compose (nginx, backend, frontend, postgres).
 
 ## Module boundary rule
 
 A module never imports another module's service/router directly. Cross-module
 communication goes through shared interfaces in `backend/src/shared/`
-(`CardSessionStore`, `UserStore`, `SessionStore`, `SheetsProvisioner`,
-`AuditLogger`, `Metrics`). `app.ts` is the composition root that wires
-implementations in.
+(`CardSessionStore`, `UserStore`, `SessionStore`, `QuotaStore`,
+`LicenseSettingsStore`, `TierStore`, `SheetsProvisioner`, `AuditLogger`,
+`Metrics`). `app.ts` is the composition root that wires implementations in.
+Scan-quota enforcement is a composed middleware (`createQuotaGuard`), mounted
+onto the M2 route in `app.ts` — the pipeline modules import nothing
+quota/tier-related.
 
 ## Terminology (use these exact words)
 
@@ -37,6 +40,31 @@ Admin vocabulary is separate and equally fixed: **Admin** (the single operator
 from `ADMIN_USERNAME` — never "superuser"/"root"/"staff") and **Admin Session**
 (in-memory, 8h Absolute Lifetime, `admin_session` cookie — never "admin token").
 An Admin Session is never an Active Session; they share no code path.
+
+License/quota vocabulary is likewise fixed: **Scan** (one OCR run = one metered
+unit), **Free pool** (a counter, no expiry) vs **Paid pool** (the sum of
+non-expired **Grants**), **Grant** (one dated paid allowance with Active/Expired
+status), **Override** (a per-user *free* limit; removing it resets to the global
+default), **Consume** (draw one unit at OCR, free-first-then-paid), **Enforcement**
+(the global hard-block toggle), **Scan-Block** (a scanning-only per-user block —
+`403 SCAN_BLOCKED`, NOT the same as Revoke Access, which blocks login), **Tier**
+(a named, admin-editable allowance preset), **Unlimited** (a per-tier flag →
+per-user allow-always window; the `pool:"unlimited"` consume never decrements),
+**Tier assignment** (snapshots the tier config as-of-now, so editing a tier only
+affects future assignments), **Upgrade Request** (a user-filed *ask* for more
+scans — a `tier` pick or a `custom` amount; it changes no quota until an admin
+**Approves** or **Rejects** it, and approval flows through the same
+`assignTier`/`grantPaid` seam — never a parallel grant path), **one pending
+request per user** (a DB rule; a second is `409 REQUEST_ALREADY_PENDING`). Never
+"credit", "subscription", or "token" for quota. See
+`docs/modules/admin/LICENSE_MANAGEMENT.md`.
+
+**Tier enforcement keys off config, never name.** The consume path and quota
+guard read only `is_unlimited`/`scan_limit`/`validity_days` — never a tier's
+`name`. This is what lets an admin create Custom tiers with zero code, and it is
+a tested invariant (a grep for tier-name literals in the store/guard must stay
+empty; `quota-store.test.ts` proves a custom unlimited tier is honored). Do not
+introduce a `switch(tierName)` anywhere in enforcement.
 
 "M5" is the requirement id (docs); `google-sheets` is the module id (code
 paths). Both are correct in context — don't invent a third.
@@ -97,6 +125,7 @@ policy, and the rollback plan. The ones easiest to break by accident:
 - Camera capture requires a secure context (`localhost` or HTTPS).
 - Credentials: `SESSION_SECRET` (≥32 chars), `TOKEN_ENCRYPTION_KEY` (**required** — backend exits at boot without it; `openssl rand -hex 32`), `MISTRAL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `DATABASE_URL` — all via env vars, see `.env.example`. Never hardcode or commit real values.
   `ADMIN_USERNAME` + `ADMIN_PASSWORD_HASH` (admin panel) are **optional and both-or-neither**: absent = the panel is disabled (routes 503, and every pre-existing deploy/test takes this path); exactly one set, or a non-bcrypt hash, is a deliberate boot error.
-- Error convention (backend): `CardNotFoundError`→404, `PipelineOrderError`→409, `ValidationError`→400, `NotAuthenticatedError`→401, `SessionRevokedError`→401 with `{code:"SESSION_REVOKED"}`, `ReauthRequiredError`→401 with `{code:"REAUTH_REQUIRED"}`. The two 401s are matched specific-first. All handled once in `backend/src/shared/http/error-handler.ts`.
+- Error convention (backend): `CardNotFoundError`→404, `PipelineOrderError`→409, `ValidationError`→400, `NotAuthenticatedError`→401, `SessionRevokedError`→401 with `{code:"SESSION_REVOKED"}`, `ReauthRequiredError`→401 with `{code:"REAUTH_REQUIRED"}`, `UserDisabledError`→403 with `{code:"USER_DISABLED"}`, `QuotaExceededError`→402 with `{code:"QUOTA_EXCEEDED"}`, `ScanBlockedError`→403 with `{code:"SCAN_BLOCKED"}`, `LicenseUserNotFoundError`→404 with `{code:"LICENSE_USER_NOT_FOUND"}`, `LicenseValidationError`→400 with `{code:"LICENSE_INVALID"}`, `TierNotFoundError`→404 with `{code:"TIER_NOT_FOUND"}`, `RequestValidationError`→400 with `{code:"REQUEST_INVALID"}`, `DuplicatePendingRequestError`→409 with `{code:"REQUEST_ALREADY_PENDING"}`. The 401s are matched specific-first; the two 403s (`USER_DISABLED` vs `SCAN_BLOCKED`) are distinguished by `code`, never by status — clients must branch on `code`. All handled once in `backend/src/shared/http/error-handler.ts`.
+- **The scan pipeline now requires sign-in (License Management):** M1 `POST /api/cards` applies `requireAuth`, and M2 `POST /api/cards/:cardId/recognize` additionally passes the quota guard. M1–M4 are no longer anonymous — a cookieless upload is 401. Integration specs that drive the pipeline authenticate via `buildAuthedTestApp` (`tests/helpers/app.ts`), which seeds an active session and signs a `c2c_session` cookie. The quota guard meters exactly-once by `cardId`, so a retried `recognize` bills a scan only once.
 - Rate limiters are **disabled when `NODE_ENV=test`** (`shared/http/rate-limit.ts`) — integration specs fire dozens of requests from one IP. `tests/unit/rate-limit.test.ts` enables them explicitly.
 - The dev frontend container has **no bind mount** — it bakes `src/` in at build time. After changing frontend code, `docker compose up -d --build frontend` before running E2E, or you'll test stale code.

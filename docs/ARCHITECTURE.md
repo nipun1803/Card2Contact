@@ -105,6 +105,26 @@ per-user sheet survive restarts. See
 `UserStore`, the `TokenCodec` seam (token encryption postponed), and the signed
 httpOnly session cookie that identifies the current user.
 
+**License Management / Scan Quota (durable).** Scan metering, per-user quotas,
+and configurable **Tiers** are persisted in eight Postgres tables
+(`license_settings`, `scan_quotas`, `paid_grants`, `quota_consumptions`,
+`quota_ledger`, `tiers`, `tier_assignments`, `tier_requests`) via the
+`QuotaStore`, `LicenseSettingsStore`, `TierStore`, and `TierRequestStore` shared
+interfaces. Enforcement is a
+composed middleware (`createQuotaGuard`) on the M2 (OCR) route; as a consequence
+the **whole scan pipeline now requires sign-in** (M1 applies `requireAuth`). A
+scan is metered exactly-once by `cardId`, drawing free-first-then-paid; an
+exhausted user gets `402 QUOTA_EXCEEDED`, a Scan-Blocked user `403 SCAN_BLOCKED`.
+A **Tier** is admin-editable data — enforcement reads its config
+(`is_unlimited`/`scan_limit`/`validity_days`), never its name, so custom tiers
+need no code; an unlimited tier grants a per-user allow-always window that never
+decrements. **Tier Upgrade Requests** add a user-initiated workflow on top: a
+signed-in user files a request (via the `licensing` module at `/api/me/*`, behind
+`requireAuth`); an admin approves or rejects it, and approval flows through the
+existing `assignTier`/`grantPaid` seam — the same seam a future payment webhook
+calls, so there is one grant path. See
+[docs/modules/admin/LICENSE_MANAGEMENT.md](./modules/admin/LICENSE_MANAGEMENT.md).
+
 ## cardId
 
 Generated as a v4 UUID (`crypto.randomUUID()`) by M1 when a card is submitted.
