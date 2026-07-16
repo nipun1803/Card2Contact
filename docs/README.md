@@ -32,7 +32,7 @@ each one is self-contained, with cross-links where it depends on another.
 | [M4 – Contact Review](modules/M4-Contact-Review.md) | Lets the user review, edit, and confirm extracted contact data. |
 | [M5 – Google Sheets Integration](modules/M5-Google-Sheets-Integration.md) | Saves the confirmed contact as a row in the user's own Google Sheet. |
 | [Users & Persistence](modules/Users-Persistence.md) | Shared infra: multi-user identity, Postgres `users` table, OAuth tokens, session cookie. |
-| [Admin](modules/admin/) | Operator surface: a separate admin login at `/admin/login`, independent of Google OAuth, guarding all `/api/admin/*` routes. |
+| [Admin](modules/admin/) | Operator surface: a separate admin login at `/admin/login`, independent of Google OAuth, guarding all `/api/admin/*` routes, including user directory/management at `/admin/users`. |
 
 ## Implementation
 

@@ -126,7 +126,15 @@ Defined once in `backend/src/shared/http/` and reused by every module's router:
   failing silently.
 - A request presenting a session that was **revoked** → `SessionRevokedError` →
   **401** with `{ code: "SESSION_REVOKED" }`, so the frontend can say *why* the
-  user was signed out instead of bouncing to `/login` silently.
+  user was signed out instead of bouncing to `/login` silently. The message
+  itself depends on `revoked_reason`: "you signed in on another device" for a
+  real Session Replacement, but "your session was ended by an administrator"
+  for an admin's Revoke Access / Force Logout (`reason: "user_revoked"`) —
+  reusing the "another device" wording for an admin action would be false and
+  misleading. `SessionStore.getRevokedReason()` reads `revoked_reason` back
+  from Postgres for exactly this; the reason itself is never sent to the
+  client (see `RevokeReason`'s doc comment) — only the two derived, honest
+  messages are.
 
 All are caught once by `backend/src/shared/http/error-handler.ts`,
 registered as Express error-handling middleware in `app.ts`. The two 401s are
@@ -223,6 +231,34 @@ Conflict; continuing revokes the first.
 - **The revoked device finds out** via React Query's `refetchOnWindowFocus` on
   the auth query — no polling, no websockets.
 
+## Back-forward cache (bfcache) forces a reload
+
+`frontend/src/main.tsx` registers a `pageshow` listener at module scope,
+before React mounts, that calls `location.reload()` whenever
+`event.persisted` is true:
+
+```ts
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) window.location.reload();
+});
+```
+
+Without this, a browser can restore a **frozen** React tree from the
+back-forward cache on Back/Forward navigation instead of re-fetching the
+page — no route guard runs, because the page was never re-requested. The
+concrete failure this caused: a user who visited `/admin/login` (or any
+other route) in a tab, then navigated elsewhere and signed in with Google,
+could hit Back after the post-OAuth redirect and have the browser restore
+the stale `/admin/login` render straight from bfcache — landing them on a
+page that has nothing to do with their actual, current auth state, because
+`PublicOnly`/`ProtectedRoute`/`AdminProtectedRoute` never got a chance to
+re-evaluate against the browser's current cookies. Forcing a reload on
+`persisted: true` makes every back/forward navigation re-run the full route
+tree and its guards against fresh state, at the cost of losing bfcache's
+instant-restore performance benefit for this app — an acceptable trade,
+since every route here is guard-gated and auth-sensitive rather than static
+content.
+
 ## Admin authentication
 
 A second, entirely independent identity system (Phase 0.1). Full design in
@@ -276,6 +312,47 @@ including the threat model; the cross-cutting decisions are here.
   `tests/unit/session-middleware.test.ts` — deleting the guard fails it, and so
   does widening it to all of `/api`.
 
+## Admin — User Management
+
+Phase 1, built on top of Admin Authentication above. Full design, threat
+model, lifecycle, API reference, schema, and what's deferred all live in
+[docs/modules/admin/USER_MANAGEMENT.md](modules/admin/USER_MANAGEMENT.md).
+
+- **A disabled user cannot create a new session or use the pipeline's
+  authenticated save.** `UserDisabledError` (403) is thrown at the Google
+  OAuth callback (before the Session Conflict branch) and at the M5 save
+  route — enforced before any token/session work completes. The M5 check is
+  free: `req.auth.user.disabledAt` is already populated, since the session
+  middleware loads the full `UserRecord` on every request.
+- **Revoking a user's access takes effect immediately, not just for future
+  logins.** `AdminUserService.disable()` and `forceLogout()` force-revoke all
+  live sessions via the same `SessionStore.revokeAllForUser` primitive
+  Session Replacement already uses, with reason `"user_revoked"` — a value
+  the `RevokeReason` union had reserved since before this phase existed. The
+  user then sees an honest message for it, not "another device" — see the
+  `SessionRevokedError` entry in "Error conventions" above.
+- **The response envelope is scoped to `/api/admin/users*`, not app-wide.**
+  Every other route (including `/api/admin/auth/*`) keeps the existing raw
+  JSON convention. Retrofitting `{data, meta}` everywhere would touch every
+  existing frontend error-handling branch for zero benefit — see
+  [USER_MANAGEMENT.md](modules/admin/USER_MANAGEMENT.md#7-endpoints)'s
+  Conventions section.
+- **"Scans," in the admin UI, is `savedContactsCount` relabeled — not a
+  second, separately tracked count.** M1 image uploads are transient,
+  in-memory pipeline state with no Postgres trace (see "Card session state"
+  above), so there is no reliable way to count attempts that never reached a
+  successful M5 save. The admin surface reuses the one number that already
+  has a durable history rather than building a parallel, less-trustworthy
+  metric. `UserStats.totalScans` (`GET /api/admin/users`) is
+  `SUM(saved_contacts_count)` across every user, computed at query time —
+  not a stored aggregate column.
+- **The admin surface never returns `spreadsheetUrl`, only
+  `spreadsheetTitle`.** Visibility into a user's *activity* (scan count,
+  session status) does not require a live credential to their private
+  spreadsheet data — the two are deliberately kept separate, unlike the
+  user's own `/api/auth/google/status`, which does return the link so the
+  user can open their own sheet.
+
 ## Sheet recovery
 
 A **trashed** spreadsheet reads and writes normally through the Sheets API and
@@ -296,8 +373,24 @@ interfaces (`AuditLogger`, `Metrics`) so tests inject memory doubles and a
 future sink is a wiring change in `index.ts`. Grep by `"kind":"audit"` or
 `"kind":"metrics"`.
 
-Deliberately **not** an audit table: an append-only table needs retention,
-indexing, and migration for a payload the container platform already captures.
+**Architecture decision change (Admin User Management, Phase 1): audit
+logging is no longer stdout-only.** This doc previously said audit was
+deliberately not a table, because an append-only table needs retention,
+indexing, and migration for a payload the container platform already
+captures. That reasoning held until the admin User Details page needed
+queryable per-user history (login, revoke/restore, reconnect, sheet
+recreation, contact saves) — a need stdout genuinely cannot serve; `docker
+logs | grep` has no per-user index and no pagination. `index.ts` now wires
+`PgAuditLogger`, which **dual-writes**: every `log()` call still writes to
+stdout (the existing `docker logs` ops workflow, unchanged) *and* inserts
+into a new `audit_log` Postgres table (queryable via `AuditLogger.query()`,
+an optional interface method only the Postgres-backed sink implements). See
+[USER_MANAGEMENT.md](modules/admin/USER_MANAGEMENT.md#6-entities-data-model)
+for the table's DDL and the business rules this enables. The field policy
+below is unchanged and applies
+identically to both the stdout line and the Postgres row for a given event —
+enforced once, at the sink, not duplicated per call site.
+
 Metrics stay separate from audit because audit is per-event and bound by a
 strict field policy, while metrics are aggregate and carry no identifiers —
 merging them would force one to inherit the other's constraints.
@@ -344,6 +437,9 @@ What this system can honestly claim — and, just as importantly, what it cannot
 | 14 | Admin login reveals nothing about which credential was wrong | Byte-identical generic 401 for every credential failure, plus a constant-work bcrypt compare against a dummy hash on a username miss |
 | 15 | Admin login brute force is bounded | 5 attempts / 15 min / IP, plus bcrypt cost 12 (~100ms per attempt) |
 | 16 | No Admin Session outlives 8h, however active | Absolute Lifetime enforced in `findActive` on every lookup; no idle bound, no sliding renewal |
+| 17 | A disabled user cannot create a new session or use the pipeline's authenticated save | `UserDisabledError` at the OAuth callback and M5 save gate; enforced before any token/session work completes |
+| 18 | Revoking a user's access takes effect immediately, not just for future logins | `AdminUserService.disable()` force-revokes all live sessions via `revokeAllForUser("user_revoked")` in the same request, before responding |
+| 19 | The admin panel never grants a live link to a user's spreadsheet | `/api/admin/users*` serializes `spreadsheetTitle` only — `spreadsheetUrl` is dropped in `toUserSummaryJson`, never reaching the admin client |
 
 **Explicitly NOT guaranteed** — stated so nobody assumes otherwise:
 
