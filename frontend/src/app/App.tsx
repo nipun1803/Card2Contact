@@ -13,7 +13,8 @@ export function App() {
     <ErrorBoundary FallbackComponent={ErrorFallback}>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <RouterProvider router={router} />
+          {/* v7_startTransition: silences a repeated dev warning that was drowning out real Sentry log entries. */}
+          <RouterProvider router={router} future={{ v7_startTransition: true }} />
           <Toaster />
         </ThemeProvider>
       </QueryClientProvider>

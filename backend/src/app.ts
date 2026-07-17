@@ -1,4 +1,4 @@
-import express, { Express } from "express";
+import express, { Express, NextFunction, Request, Response } from "express";
 import * as Sentry from "@sentry/node";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -191,6 +191,27 @@ export function createApp(deps: {
   // once cookies (credentials) are sent, so the session cookie can ride along.
   app.use(cors({ origin: FRONTEND_URL, credentials: true }));
   app.use(express.json());
+
+  /**
+   * Every request, logged once it finishes — method, path, status, timing.
+   * Never headers/query/body: those can carry session cookies, tokens, or
+   * contact data (see CLAUDE.md's "never log tokens, emails, contact data").
+   * `req.route`-less paths (404s, rejected before routing) fall back to
+   * `req.path` so those are still visible.
+   */
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const start = Date.now();
+    res.on("finish", () => {
+      const level = res.statusCode >= 500 ? "error" : "info";
+      Sentry.logger[level]("api_call", {
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        duration_ms: Date.now() - start,
+      });
+    });
+    next();
+  });
 
   const sessionSecret = process.env.SESSION_SECRET;
   if (!sessionSecret || sessionSecret.length < MIN_SESSION_SECRET_LENGTH) {

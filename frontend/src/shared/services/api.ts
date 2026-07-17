@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/react";
 import type { Contact, ContactEdits } from "@/shared/types/contact";
 import type {
   AdminAuditResponse,
@@ -123,13 +124,27 @@ export class NetworkError extends Error {
   }
 }
 
+/**
+ * Every API call, success or failure, logged in one place — never the request
+ * or response body (which can carry contact data or tokens), only method,
+ * path, status, and timing.
+ */
+function logApiCall(method: string, path: string, status: number | "network_error", durationMs: number) {
+  const level = status === "network_error" || (typeof status === "number" && status >= 500) ? "error" : "info";
+  Sentry.logger[level]("api_call", { method, path, status, duration_ms: durationMs });
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = init?.method ?? "GET";
+  const start = performance.now();
   let res: Response;
   try {
     res = await fetch(path, { credentials: "include", ...init });
   } catch {
+    logApiCall(method, path, "network_error", performance.now() - start);
     throw new NetworkError();
   }
+  logApiCall(method, path, res.status, performance.now() - start);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
