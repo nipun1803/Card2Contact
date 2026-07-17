@@ -193,21 +193,20 @@ export function createApp(deps: {
   app.use(express.json());
 
   /**
-   * Every request, logged once it finishes — method, path, status, timing.
-   * Never headers/query/body: those can carry session cookies, tokens, or
-   * contact data (see CLAUDE.md's "never log tokens, emails, contact data").
-   * `req.route`-less paths (404s, rejected before routing) fall back to
-   * `req.path` so those are still visible.
+   * Every request's volume and latency, as Sentry metrics — never
+   * headers/query/body, only method/status/timing (see CLAUDE.md's "never log
+   * tokens, emails, contact data").
    */
   app.use((req: Request, res: Response, next: NextFunction) => {
     const start = Date.now();
     res.on("finish", () => {
-      const level = res.statusCode >= 500 ? "error" : "info";
-      Sentry.logger[level]("api_call", {
-        method: req.method,
-        path: req.path,
-        status: res.statusCode,
-        duration_ms: Date.now() - start,
+      const durationMs = Date.now() - start;
+      Sentry.metrics.count("api_call", 1, {
+        attributes: { method: req.method, status: String(res.statusCode) },
+      });
+      Sentry.metrics.distribution("api_call.duration_ms", durationMs, {
+        unit: "millisecond",
+        attributes: { method: req.method, status: String(res.statusCode) },
       });
     });
     next();

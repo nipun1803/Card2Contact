@@ -125,13 +125,17 @@ export class NetworkError extends Error {
 }
 
 /**
- * Every API call, success or failure, logged in one place — never the request
+ * Every API call's volume and latency, as Sentry metrics — never the request
  * or response body (which can carry contact data or tokens), only method,
- * path, status, and timing.
+ * status, and timing.
  */
-function logApiCall(method: string, path: string, status: number | "network_error", durationMs: number) {
-  const level = status === "network_error" || (typeof status === "number" && status >= 500) ? "error" : "info";
-  Sentry.logger[level]("api_call", { method, path, status, duration_ms: durationMs });
+function recordApiCallMetric(method: string, status: number | "network_error", durationMs: number) {
+  const statusTag = String(status);
+  Sentry.metrics.count("api_call", 1, { attributes: { method, status: statusTag } });
+  Sentry.metrics.distribution("api_call.duration_ms", durationMs, {
+    unit: "millisecond",
+    attributes: { method, status: statusTag },
+  });
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -141,10 +145,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(path, { credentials: "include", ...init });
   } catch {
-    logApiCall(method, path, "network_error", performance.now() - start);
+    recordApiCallMetric(method, "network_error", performance.now() - start);
     throw new NetworkError();
   }
-  logApiCall(method, path, res.status, performance.now() - start);
+  recordApiCallMetric(method, res.status, performance.now() - start);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
